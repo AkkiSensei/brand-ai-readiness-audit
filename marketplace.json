@@ -1,0 +1,65 @@
+{
+  "$schema": "https://agentskills.io/schemas/marketplace/v1.json",
+  "name": "brand-ai-readiness-audit",
+  "version": "1.0.0",
+  "description": "A 5-skill modular marketplace that audits any public brand website for AI-engine readiness, covering crawlability, structured data, entity trust, and engagement signals.",
+  "author": "brand-ai-readiness-audit contributors",
+  "license": "MIT",
+  "skills": [
+    {
+      "id": "audit-orchestrator",
+      "name": "Audit Orchestrator",
+      "path": "skills/audit-orchestrator",
+      "entrypoint": true,
+      "description": "Coordinates end-to-end audit execution across all domain sub-skills, deduplicates findings, injects proactive recommendations, and validates final output against report.schema.json.",
+      "version": "1.0.0",
+      "tags": ["orchestration", "coordination", "validation", "deduplication"]
+    },
+    {
+      "id": "crawl-render-access",
+      "name": "Crawl & Render Access",
+      "path": "skills/crawl-render-access",
+      "entrypoint": false,
+      "description": "Audits robots.txt AI bot policies, SSR vs CSR text blanking ratios, HTTP status codes, and sitemap completeness.",
+      "version": "1.0.0",
+      "tags": ["crawlability", "robots.txt", "SSR", "CSR", "sitemap", "http"]
+    },
+    {
+      "id": "structured-fact-extraction",
+      "name": "Structured Fact Extraction",
+      "path": "skills/structured-fact-extraction",
+      "entrypoint": false,
+      "description": "Validates Schema.org JSON-LD markup, detects facts trapped in images/canvas/PDFs, and inspects freshness metadata.",
+      "version": "1.0.0",
+      "tags": ["schema.org", "json-ld", "structured-data", "metadata", "accessibility"]
+    },
+    {
+      "id": "trust-entity-corroboration",
+      "name": "Trust & Entity Corroboration",
+      "path": "skills/trust-entity-corroboration",
+      "entrypoint": false,
+      "description": "Validates sameAs entity graph linkage, NAP (Name/Address/Phone) consistency across pages, and brand disambiguation heuristics.",
+      "version": "1.0.0",
+      "tags": ["entity", "knowledge-graph", "NAP", "sameAs", "trust", "disambiguation"]
+    },
+    {
+      "id": "engagement-retention",
+      "name": "Engagement & Retention",
+      "path": "skills/engagement-retention",
+      "entrypoint": false,
+      "description": "Audits above-the-fold navigation and H1 orientation, detects post-load interstitials and modals, and measures viewport layout stability.",
+      "version": "1.0.0",
+      "tags": ["UX", "engagement", "interstitial", "CLS", "above-the-fold", "navigation"]
+    }
+  ],
+  "python": {
+    "requires": ">=3.10",
+    "dependencies": [
+      "requests>=2.31.0",
+      "beautifulsoup4>=4.12.0",
+      "lxml>=5.0.0",
+      "jsonschema>=4.21.0",
+      "playwright>=1.43.0"
+    ]
+  }
+}

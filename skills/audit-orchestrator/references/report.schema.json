@@ -1,0 +1,242 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://brand-ai-readiness-audit/schemas/report.schema.json",
+  "title": "BrandAIReadinessReport",
+  "description": "Schema for the full AI-readiness audit report produced by the audit-orchestrator skill.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generated_at",
+    "target_url",
+    "summary",
+    "findings"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Semantic version of this report schema.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "examples": ["1.0.0"]
+    },
+    "generated_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp when the report was generated.",
+      "format": "date-time"
+    },
+    "target_url": {
+      "type": "string",
+      "description": "The canonical root URL that was audited.",
+      "format": "uri"
+    },
+    "pages_audited": {
+      "type": "integer",
+      "description": "Total number of pages that were successfully fetched and analyzed.",
+      "minimum": 0
+    },
+    "audit_duration_seconds": {
+      "type": "number",
+      "description": "Wall-clock time in seconds for the complete audit run.",
+      "minimum": 0
+    },
+    "summary": {
+      "type": "object",
+      "description": "Aggregate counts broken down by severity.",
+      "required": ["total_findings", "critical", "high", "medium", "low", "info"],
+      "additionalProperties": false,
+      "properties": {
+        "total_findings": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "critical": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "high": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "medium": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "low": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "info": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "overall_score": {
+          "type": "number",
+          "description": "Composite AI-readiness score from 0 (worst) to 100 (best).",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "grade": {
+          "type": "string",
+          "description": "Letter grade derived from overall_score.",
+          "enum": ["A", "B", "C", "D", "F"]
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "description": "Ordered list of individual audit findings, sorted by severity descending.",
+      "items": {
+        "$ref": "#/definitions/Finding"
+      }
+    },
+    "proactive_recommendations": {
+      "type": "array",
+      "description": "High-level recommendations that are not tied to a specific finding but improve overall AI-readiness.",
+      "items": {
+        "type": "string",
+        "minLength": 10
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "description": "Per-domain-skill coverage metadata.",
+      "additionalProperties": false,
+      "properties": {
+        "crawl_render_access": { "$ref": "#/definitions/SkillCoverage" },
+        "structured_fact_extraction": { "$ref": "#/definitions/SkillCoverage" },
+        "trust_entity_corroboration": { "$ref": "#/definitions/SkillCoverage" },
+        "engagement_retention": { "$ref": "#/definitions/SkillCoverage" }
+      }
+    }
+  },
+  "definitions": {
+    "Severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low", "info"],
+      "description": "Impact level of the finding."
+    },
+    "Category": {
+      "type": "string",
+      "enum": [
+        "crawl_render_access",
+        "structured_fact_extraction",
+        "trust_entity_corroboration",
+        "engagement_retention"
+      ],
+      "description": "Which domain sub-skill produced this finding."
+    },
+    "Finding": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "severity",
+        "category",
+        "evidence",
+        "suggested_action"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique, stable slug identifier for this finding type.",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "minLength": 3,
+          "maxLength": 80
+        },
+        "title": {
+          "type": "string",
+          "description": "Short, human-readable title of the finding.",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "severity": {
+          "$ref": "#/definitions/Severity"
+        },
+        "category": {
+          "$ref": "#/definitions/Category"
+        },
+        "evidence": {
+          "type": "object",
+          "description": "Structured evidence supporting the finding.",
+          "required": ["url"],
+          "additionalProperties": true,
+          "properties": {
+            "url": {
+              "type": "string",
+              "format": "uri",
+              "description": "The specific page URL where the evidence was found."
+            },
+            "snippet": {
+              "type": "string",
+              "description": "Raw text or code snippet extracted as evidence."
+            },
+            "metric_value": {
+              "description": "Numeric or string metric value that triggered the finding.",
+              "oneOf": [
+                { "type": "number" },
+                { "type": "string" }
+              ]
+            },
+            "metric_threshold": {
+              "description": "The threshold value that the metric violated.",
+              "oneOf": [
+                { "type": "number" },
+                { "type": "string" }
+              ]
+            },
+            "selector": {
+              "type": "string",
+              "description": "CSS or XPath selector pointing to the offending element."
+            },
+            "context": {
+              "type": "object",
+              "description": "Any additional structured context, free-form key-value.",
+              "additionalProperties": true
+            }
+          }
+        },
+        "suggested_action": {
+          "type": "string",
+          "description": "Concrete, actionable fix recommendation.",
+          "minLength": 10
+        },
+        "references": {
+          "type": "array",
+          "description": "External documentation or spec URLs.",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          }
+        },
+        "duplicate_of": {
+          "type": "string",
+          "description": "If set, this finding was deduplicated and is equivalent to the finding with this ID.",
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        }
+      }
+    },
+    "SkillCoverage": {
+      "type": "object",
+      "required": ["pages_checked", "checks_run", "errors"],
+      "additionalProperties": false,
+      "properties": {
+        "pages_checked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checks_run": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
