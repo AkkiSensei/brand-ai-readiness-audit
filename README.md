@@ -300,7 +300,7 @@ All scoring weights, severity deductions, and grade boundaries are loaded dynami
 
 Let $\mathcal{D}$ represent the set of four audited domain sub-skills:
 
-$$\mathcal{D} = \{\text{crawl\_render\_access}, \text{structured\_fact\_extraction}, \text{trust\_entity\_corroboration}, \text{engagement\_retention}\}$$
+$$\mathcal{D} = \{\text{crawl-render-access}, \text{structured-fact-extraction}, \text{trust-entity-corroboration}, \text{engagement-retention}\}$$
 
 Each domain $d \in \mathcal{D}$ has a configured domain weight $w_d$ such that $\sum_{d \in \mathcal{D}} w_d = 1.0$:
 
