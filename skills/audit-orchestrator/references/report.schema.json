@@ -118,12 +118,15 @@
     "Category": {
       "type": "string",
       "enum": [
+        "discoverability",
+        "engagement",
+        "proactive",
         "crawl_render_access",
         "structured_fact_extraction",
         "trust_entity_corroboration",
         "engagement_retention"
       ],
-      "description": "Which domain sub-skill produced this finding."
+      "description": "Domain or strategic category of the finding."
     },
     "Finding": {
       "type": "object",
@@ -139,10 +142,14 @@
       "properties": {
         "id": {
           "type": "string",
-          "description": "Unique, stable slug identifier for this finding type.",
-          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+          "description": "Unique, stable identifier for this finding.",
+          "pattern": "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$",
           "minLength": 3,
           "maxLength": 80
+        },
+        "local_id": {
+          "type": "string",
+          "description": "Domain runner local ID (e.g. CR-001, SF-001)."
         },
         "title": {
           "type": "string",
@@ -157,49 +164,74 @@
           "$ref": "#/definitions/Category"
         },
         "evidence": {
+          "description": "Structured evidence or description supporting the finding.",
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 3
+            },
+            {
+              "type": "object",
+              "required": ["url"],
+              "additionalProperties": true,
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "description": "The specific page URL where the evidence was found."
+                },
+                "snippet": {
+                  "type": "string",
+                  "description": "Raw text or code snippet extracted as evidence."
+                },
+                "metric_value": {
+                  "description": "Numeric or string metric value that triggered the finding.",
+                  "oneOf": [
+                    { "type": "number" },
+                    { "type": "string" }
+                  ]
+                },
+                "metric_threshold": {
+                  "description": "The threshold value that the metric violated.",
+                  "oneOf": [
+                    { "type": "number" },
+                    { "type": "string" }
+                  ]
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "CSS or XPath selector pointing to the offending element."
+                },
+                "context": {
+                  "type": "object",
+                  "description": "Any additional structured context, free-form key-value.",
+                  "additionalProperties": true
+                }
+              }
+            }
+          ]
+        },
+        "suggested_action": {
           "type": "object",
-          "description": "Structured evidence supporting the finding.",
-          "required": ["url"],
+          "description": "Concrete, actionable fix recommendation.",
+          "required": ["summary", "priority"],
           "additionalProperties": true,
           "properties": {
-            "url": {
+            "summary": {
               "type": "string",
-              "format": "uri",
-              "description": "The specific page URL where the evidence was found."
+              "minLength": 5
             },
-            "snippet": {
-              "type": "string",
-              "description": "Raw text or code snippet extracted as evidence."
-            },
-            "metric_value": {
-              "description": "Numeric or string metric value that triggered the finding.",
-              "oneOf": [
-                { "type": "number" },
-                { "type": "string" }
-              ]
-            },
-            "metric_threshold": {
-              "description": "The threshold value that the metric violated.",
-              "oneOf": [
-                { "type": "number" },
-                { "type": "string" }
-              ]
-            },
-            "selector": {
-              "type": "string",
-              "description": "CSS or XPath selector pointing to the offending element."
-            },
-            "context": {
-              "type": "object",
-              "description": "Any additional structured context, free-form key-value.",
-              "additionalProperties": true
+            "priority": {
+              "$ref": "#/definitions/Severity"
             }
           }
         },
-        "suggested_action": {
-          "type": "string",
-          "description": "Concrete, actionable fix recommendation.",
-          "minLength": 10
+        "related_to": {
+          "type": "array",
+          "description": "List of related finding IDs.",
+          "items": {
+            "type": "string"
+          }
         },
         "references": {
           "type": "array",
@@ -212,7 +244,7 @@
         "duplicate_of": {
           "type": "string",
           "description": "If set, this finding was deduplicated and is equivalent to the finding with this ID.",
-          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+          "pattern": "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$"
         }
       }
     },
