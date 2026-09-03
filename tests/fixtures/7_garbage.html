@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Malformed & Garbage Document</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <!-- Primitive string JSON-LD root -->
+  <script type="application/ld+json">"Just a string"</script>
+  
+  <!-- Primitive integer JSON-LD root -->
+  <script type="application/ld+json">42</script>
+  
+  <!-- List of non-dict items -->
+  <script type="application/ld+json">["first", null, true, 100]</script>
+
+  <!-- Nested @graph with non-dict elements -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      "not an object",
+      {"@type": "WebSite", "name": "Garbage Site"},
+      12345
+    ]
+  }
+  </script>
+</head>
+<body>
+  <!-- Deeply nested unclosed nav -->
+  <nav class="broken-nav">
+    <ul>
+      <li><a href="#link1">Link 1
+        <ul>
+          <li><a href="#link2">Link 2
+            <ul>
+              <li><a href="#link3">Link 3
+                <div><span><b><a href="#link4">Deeply Nested Link</b></span>
+    <!-- Unclosed tags intentionally -->
+    <header>
+      <h1>Broken Tag Header
+      <p>Unclosed paragraph with strange attributes: <span data-attr=""'""""><a href="#test">Test</a>
+    <div>
+      <article>
+        <h2>Section Heading Without Close
+        <p>Text continues...
+        <canvas id="unclosed-canvas"
+        <img src="corrupt.png" alt="broken
+        <table>
+          <tr><td>Cell 1<td>Cell 2
+          <tr><td>Cell 3<td>Cell 4
+</body>
+</html>

@@ -338,9 +338,11 @@ def _check_cr002(
         for url, pr in page_results.items():
             if pr.status_code is not None and pr.status_code not in (200, 301):
                 bad_codes.append(f"{url} -> {pr.status_code}")
-            if len(pr.redirect_chain) > 2:
+            elif pr.status_code is None and pr.error:
+                bad_codes.append(f"{url} -> {pr.error[:80]}")
+            if len(pr.redirect_chain) > 2 or (pr.error and "redirect" in pr.error.lower()):
                 long_redirects.append(
-                    f"{url} ({len(pr.redirect_chain)} hops)"
+                    f"{url} ({len(pr.redirect_chain)} hops)" if pr.redirect_chain else f"{url} (redirect loop)"
                 )
         if bad_codes:
             findings.append(_finding(

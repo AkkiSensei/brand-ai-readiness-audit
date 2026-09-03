@@ -154,6 +154,7 @@ def _normalise_finding(raw: dict, domain_name: str, target_url: str) -> dict:
 
     return {
         "_local_id": raw.get("local_id", ""),
+        "local_id": raw.get("local_id", ""),
         "_domain": domain_name,
         "_related_to_local": list(raw.get("related_to", [])),
         "id": "",  # assigned after dedup + ordering
@@ -223,7 +224,7 @@ def _resolve_related_to(findings: list[dict]) -> list[dict]:
     # Build local_id -> final_id map
     local_to_final: dict[str, str] = {}
     for f in findings:
-        lid = f.get("_local_id", "")
+        lid = f.get("_local_id", "") or f.get("local_id", "")
         if lid:
             local_to_final[lid] = f["id"]
 
@@ -233,10 +234,20 @@ def _resolve_related_to(findings: list[dict]) -> list[dict]:
         related_local = f.get("_related_to_local", [])
         resolved: list[str] = []
         for ref in related_local:
-            final = local_to_final.get(ref)
-            if final and final != f["id"] and final in final_ids:
-                resolved.append(final)
-        f["related_to"] = resolved
+            if ref in final_ids and ref != f["id"]:
+                resolved.append(ref)
+            else:
+                final = local_to_final.get(ref)
+                if final and final != f["id"] and final in final_ids:
+                    resolved.append(final)
+        # Deduplicate while preserving order
+        seen_refs: set[str] = set()
+        deduped_resolved: list[str] = []
+        for r in resolved:
+            if r not in seen_refs:
+                seen_refs.add(r)
+                deduped_resolved.append(r)
+        f["related_to"] = deduped_resolved
 
     return findings
 

@@ -108,13 +108,17 @@ def _extract_jsonld_blocks(soup: Any) -> list[dict]:
         try:
             data = json.loads(raw)
             if isinstance(data, list):
-                blocks.extend(data)
+                for item in data:
+                    if isinstance(item, dict):
+                        blocks.append(item)
             elif isinstance(data, dict):
                 if "@graph" in data:
                     graph = data["@graph"]
                     if isinstance(graph, list):
-                        blocks.extend(graph)
-                    else:
+                        for item in graph:
+                            if isinstance(item, dict):
+                                blocks.append(item)
+                    elif isinstance(graph, dict):
                         blocks.append(graph)
                 else:
                     blocks.append(data)

@@ -114,32 +114,49 @@ def _extract_jsonld_blocks(soup: Any) -> list[dict]:
         try:
             data = json.loads(raw)
             if isinstance(data, list):
-                blocks.extend(data)
+                for item in data:
+                    if isinstance(item, dict):
+                        blocks.append(item)
+                    else:
+                        blocks.append({"_parse_error": True, "_raw": str(item)[:500]})
             elif isinstance(data, dict):
                 # Handle @graph
                 if "@graph" in data:
                     graph = data["@graph"]
                     if isinstance(graph, list):
-                        blocks.extend(graph)
-                    else:
+                        for item in graph:
+                            if isinstance(item, dict):
+                                blocks.append(item)
+                            else:
+                                blocks.append({"_parse_error": True, "_raw": str(item)[:500]})
+                    elif isinstance(graph, dict):
                         blocks.append(graph)
+                    else:
+                        blocks.append({"_parse_error": True, "_raw": str(graph)[:500]})
                 else:
                     blocks.append(data)
+            else:
+                # Primitive JSON-LD root (string, integer, boolean, null)
+                blocks.append({"_parse_error": True, "_raw": str(data)[:500]})
         except (json.JSONDecodeError, TypeError):
             blocks.append({"_parse_error": True, "_raw": raw[:500]})
     return blocks
 
 
-def _get_types(block: dict) -> list[str]:
+def _get_types(block: Any) -> list[str]:
     """Return normalised @type values from a JSON-LD block."""
+    if not isinstance(block, dict):
+        return []
     t = block.get("@type", "")
     if isinstance(t, list):
-        return [str(x).strip() for x in t]
+        return [str(x).strip() for x in t if x]
     return [str(t).strip()] if t else []
 
 
-def _count_fields(block: dict, field_set: set[str]) -> int:
+def _count_fields(block: Any, field_set: set[str]) -> int:
     """Count how many of the expected fields are present and non-empty."""
+    if not isinstance(block, dict):
+        return 0
     count = 0
     for key in field_set:
         val = block.get(key)
@@ -234,12 +251,13 @@ def _check_sf001_sf002(
 
     # SF-002: Parse errors
     if parse_error_urls:
+        unique_err_urls = list(set(parse_error_urls))
         findings.append(_finding(
             "SF-002",
             "Invalid JSON-LD syntax detected",
             "high",
-            f"{len(parse_error_urls)} page(s) have JSON-LD blocks that "
-            "fail JSON parsing: " + "; ".join(set(parse_error_urls)[:5]),
+            f"{len(unique_err_urls)} page(s) have JSON-LD blocks that "
+            "fail JSON parsing: " + "; ".join(unique_err_urls[:5]),
             "Fix JSON syntax errors in application/ld+json script blocks. "
             "Validate with Google Rich Results Test.",
         ))

@@ -158,13 +158,18 @@ class RateLimiter:
 
     def wait(self, host: str) -> None:
         """Block the calling thread until the rate limit window has elapsed."""
+        sleep_time = 0.0
         with self._lock:
             now = time.monotonic()
             last = self._last_request.get(host, 0.0)
             gap = self._interval - (now - last)
             if gap > 0:
-                time.sleep(gap)
-            self._last_request[host] = time.monotonic()
+                sleep_time = gap
+                self._last_request[host] = now + gap
+            else:
+                self._last_request[host] = now
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 
 # ---------------------------------------------------------------------------
