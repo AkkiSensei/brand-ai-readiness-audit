@@ -176,7 +176,7 @@ def run_archetype_matrix() -> int:
     print(f"  Port: {port}")
 
     passed_count = 0
-    total_count = 5
+    total_count = 8
     schema_all_passed = True
     false_positive_regressions = 0
 
@@ -316,7 +316,7 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if blog_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [5/5] Paywall
+        # [5/8] Paywall
         # -------------------------------------------------------------
         paywall_file = "5_paywall.html"
         ArchetypeRequestHandler.active_fixture = paywall_file
@@ -339,7 +339,7 @@ def run_archetype_matrix() -> int:
         if paywall_pass:
             passed_count += 1
 
-        print(f"\n[5/5] Paywall")
+        print(f"\n[5/8] Paywall")
         print(f"  Fixture: {paywall_file}")
         print(f"  URL: {paywall_url}")
         print(f"  Duration: {paywall_duration}s")
@@ -347,6 +347,106 @@ def run_archetype_matrix() -> int:
         print(f"  Detected: {paywall_rules}")
         print(f"  Schema: {'PASS' if paywall_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if paywall_pass else 'FAIL'}")
+
+        # -------------------------------------------------------------
+        # [6/8] Hydration / Partial-SSR
+        # -------------------------------------------------------------
+        hydration_file = "6_hydration.html"
+        ArchetypeRequestHandler.active_fixture = hydration_file
+        hydration_url = f"http://127.0.0.1:{port}/{hydration_file}"
+        t0 = time.time()
+        client = HttpClient(allow_private_ips=True)
+        report_hydration = run_audit(hydration_url, max_pages=3)
+        hydration_duration = round(time.time() - t0, 2)
+
+        hydration_rules = [f.get("local_id") for f in report_hydration.get("findings", []) if f.get("local_id")]
+        hydration_schema_valid, hydration_errs = _verify_report_integrity(report_hydration)
+        if not hydration_schema_valid:
+            schema_all_passed = False
+
+        hydration_pos = ("CR-004" in hydration_rules)
+        hydration_neg = ("CR-003" not in hydration_rules)
+        if not hydration_neg:
+            false_positive_regressions += 1
+        hydration_pass = hydration_pos and hydration_neg and hydration_schema_valid
+        if hydration_pass:
+            passed_count += 1
+
+        print(f"\n[6/8] Hydration / Partial-SSR")
+        print(f"  Fixture: {hydration_file}")
+        print(f"  URL: {hydration_url}")
+        print(f"  Duration: {hydration_duration}s")
+        print(f"  Expected positive: CR-004")
+        print(f"  Expected negative: CR-003 absent")
+        print(f"  Detected: {hydration_rules}")
+        print(f"  Schema: {'PASS' if hydration_schema_valid else 'FAIL'}")
+        print(f"  Result: {'PASS' if hydration_pass else 'FAIL'}")
+
+        # -------------------------------------------------------------
+        # [7/8] Benign Cookie-Consent Banner
+        # -------------------------------------------------------------
+        cookie_file = "7_cookie_banner.html"
+        ArchetypeRequestHandler.active_fixture = cookie_file
+        cookie_url = f"http://127.0.0.1:{port}/{cookie_file}"
+        t0 = time.time()
+        client = HttpClient(allow_private_ips=True)
+        report_cookie = run_audit(cookie_url, max_pages=3)
+        cookie_duration = round(time.time() - t0, 2)
+
+        cookie_rules = [f.get("local_id") for f in report_cookie.get("findings", []) if f.get("local_id")]
+        cookie_schema_valid, cookie_errs = _verify_report_integrity(report_cookie)
+        if not cookie_schema_valid:
+            schema_all_passed = False
+
+        cookie_no_intrusive = ("ER-003" not in cookie_rules and "CR-005" not in cookie_rules)
+        cookie_no_cr = ("CR-003" not in cookie_rules and "CR-004" not in cookie_rules)
+        if not cookie_no_intrusive:
+            false_positive_regressions += 1
+        cookie_pass = cookie_no_intrusive and cookie_no_cr and cookie_schema_valid
+        if cookie_pass:
+            passed_count += 1
+
+        print(f"\n[7/8] Benign Cookie-Consent Banner")
+        print(f"  Fixture: {cookie_file}")
+        print(f"  URL: {cookie_url}")
+        print(f"  Duration: {cookie_duration}s")
+        print(f"  Expected negative: ER-003 absent, CR-005 absent, CR-003/CR-004 absent")
+        print(f"  Detected: {cookie_rules}")
+        print(f"  Schema: {'PASS' if cookie_schema_valid else 'FAIL'}")
+        print(f"  Result: {'PASS' if cookie_pass else 'FAIL'}")
+
+        # -------------------------------------------------------------
+        # [8/8] i18n / Multilingual
+        # -------------------------------------------------------------
+        i18n_file = "8_i18n.html"
+        ArchetypeRequestHandler.active_fixture = i18n_file
+        i18n_url = f"http://127.0.0.1:{port}/{i18n_file}"
+        t0 = time.time()
+        client = HttpClient(allow_private_ips=True)
+        report_i18n = run_audit(i18n_url, max_pages=3)
+        i18n_duration = round(time.time() - t0, 2)
+
+        i18n_rules = [f.get("local_id") for f in report_i18n.get("findings", []) if f.get("local_id")]
+        i18n_schema_valid, i18n_errs = _verify_report_integrity(report_i18n)
+        if not i18n_schema_valid:
+            schema_all_passed = False
+
+        i18n_no_tc = ("TC-004" not in i18n_rules)
+        i18n_no_cr = ("CR-003" not in i18n_rules and "CR-004" not in i18n_rules)
+        if not i18n_no_tc:
+            false_positive_regressions += 1
+        i18n_pass = i18n_no_tc and i18n_no_cr and i18n_schema_valid
+        if i18n_pass:
+            passed_count += 1
+
+        print(f"\n[8/8] i18n / Multilingual")
+        print(f"  Fixture: {i18n_file}")
+        print(f"  URL: {i18n_url}")
+        print(f"  Duration: {i18n_duration}s")
+        print(f"  Expected negative: TC-004 absent, CR-003/CR-004 absent")
+        print(f"  Detected: {i18n_rules}")
+        print(f"  Schema: {'PASS' if i18n_schema_valid else 'FAIL'}")
+        print(f"  Result: {'PASS' if i18n_pass else 'FAIL'}")
 
     finally:
         httpd.shutdown()

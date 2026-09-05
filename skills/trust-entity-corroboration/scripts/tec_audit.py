@@ -466,7 +466,11 @@ def _check_tc003_tc005(
         for sa_url in unique[:3]:
             try:
                 head = http_client.head(sa_url)
+                is_walled_garden = any(d in sa_url.lower() for d in ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com"))
                 if head.status_code and 200 <= head.status_code < 400:
+                    verified += 1
+                elif is_walled_garden and (head.status_code == 999 or head.status_code in (401, 403)):
+                    # Anti-bot response confirms the external profile endpoint exists
                     verified += 1
                 else:
                     code = head.status_code or "no response"

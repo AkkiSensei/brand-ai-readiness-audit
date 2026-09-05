@@ -22,6 +22,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
+from bs4 import BeautifulSoup
+
 # ---------------------------------------------------------------------------
 # Path bootstrap  -- http_client lives in the same scripts/ directory
 # ---------------------------------------------------------------------------
@@ -78,6 +80,7 @@ AI_CRAWLERS: list[str] = _ROBOTS.get("known_ai_crawlers", [
 STALE_DAYS: int = int(
     _T.get("structured_data", {}).get("freshness_stale_age_days", 365)
 )
+UA_CLOAKING_THRESH: float = float(_CRAWL.get("ua_cloaking_discrepancy_threshold", 0.30))
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +393,14 @@ def _check_cr003_cr004(
 
             raw_ratio = extract_text_ratio(pr.soup)
 
-            # Detect empty SPA shells
+            # Extract visible text and word count to evaluate true content presence
+            working = BeautifulSoup(str(pr.soup), "html.parser")
+            for tag in working.find_all(["script", "style", "noscript", "meta", "link", "svg"]):
+                tag.decompose()
+            visible_text = working.get_text(separator=" ", strip=True)
+            word_count = len(visible_text.split())
+
+            # Detect empty SPA shells (app root + dynamic script + sparse initial text)
             html_str = str(pr.soup).lower()
             has_app_root = bool(
                 pr.soup.find(id="root")
@@ -400,8 +410,10 @@ def _check_cr003_cr004(
             )
             has_module_script = bool(
                 re.search(r'<script[^>]*type\s*=\s*["\']module["\']', html_str)
+                or "window.__initial_state__" in html_str
             )
-            if has_app_root and has_module_script and raw_ratio < CSR_WARN_THRESH:
+            is_spa = bool(has_app_root and has_module_script and word_count < 80)
+            if is_spa and raw_ratio < CSR_WARN_THRESH:
                 spa_shells.append(url)
 
             # Compare rendered vs raw if Playwright is available
@@ -416,7 +428,7 @@ def _check_cr003_cr004(
                 except Exception:
                     pass
 
-            is_spa = bool(has_app_root and has_module_script and raw_ratio < CSR_WARN_THRESH)
+            has_substantial_text = (word_count >= 250 and len(visible_text) >= 1000)
 
             if rendered_ok and rendered_ratio is not None and rendered_ratio > raw_ratio:
                 # Playwright execution revealed dynamic content
@@ -426,13 +438,15 @@ def _check_cr003_cr004(
                     severe.append(f"{url} (raw={raw_ratio:.2f}, rendered={rendered_ratio:.2f})")
             else:
                 effective_ratio = raw_ratio
-                if effective_ratio < TEXT_BLANK_THRESH:
-                    severe.append(f"{url} (ratio={effective_ratio:.2f})")
-                elif effective_ratio < CSR_WARN_THRESH:
-                    moderate.append(f"{url} (ratio={effective_ratio:.2f})")
+                if not has_substantial_text:
+                    if effective_ratio < TEXT_BLANK_THRESH and (word_count < 80 or is_spa):
+                        severe.append(f"{url} (ratio={effective_ratio:.2f})")
+                    elif effective_ratio < CSR_WARN_THRESH or (effective_ratio < TEXT_BLANK_THRESH and word_count < 250):
+                        moderate.append(f"{url} (ratio={effective_ratio:.2f})")
 
             # Tag render confidence: 'low' when text-blanking detected without successful Playwright render
-            if (raw_ratio < TEXT_BLANK_THRESH or is_spa) and not rendered_ok:
+            has_blanking = (not has_substantial_text) and (raw_ratio < TEXT_BLANK_THRESH or is_spa)
+            if has_blanking and not rendered_ok:
                 pr.render_confidence = "low"
             else:
                 pr.render_confidence = "high"
@@ -672,6 +686,66 @@ def _check_cr008(page_results: dict[str, PageResult]) -> list[dict]:
     return findings
 
 
+def _check_cr009(frontier: list[str], client: HttpClient) -> list[dict]:
+    """CR-009 (high): Detect UA-cloaking or content discrepancy between browser and AI crawler."""
+    findings: list[dict] = []
+    discrepancies: list[str] = []
+
+    # Sample up to 2 pages from frontier
+    sample = frontier[:2]
+    browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    ai_ua = "Mozilla/5.0 (compatible; GPTBot/1.0; +https://openai.com/gptbot)"
+
+    for url in sample:
+        try:
+            res_browser = client.get(url, skip_robots_check=True, headers={"User-Agent": browser_ua})
+            res_ai = client.get(url, skip_robots_check=True, headers={"User-Agent": ai_ua})
+
+            # 1. Status code discrepancy (e.g. 200 for browser vs 401/403/block for AI crawler)
+            if res_browser.status_code == 200 and res_ai.status_code in (401, 403, 406):
+                discrepancies.append(f"{url} (browser HTTP 200 vs GPTBot HTTP {res_ai.status_code} block)")
+                continue
+
+            if not res_browser.soup or not res_ai.soup:
+                continue
+
+            def _clean_text(soup):
+                w = BeautifulSoup(str(soup), "html.parser")
+                for tag in w.find_all(["script", "style", "noscript", "meta", "link", "svg"]):
+                    tag.decompose()
+                return w.get_text(separator=" ", strip=True)
+
+            text_browser = _clean_text(res_browser.soup)
+            text_ai = _clean_text(res_ai.soup)
+
+            len_browser = len(text_browser)
+            len_ai = len(text_ai)
+            max_len = max(len_browser, len_ai)
+
+            if max_len > 100:
+                discrepancy_ratio = abs(len_browser - len_ai) / max_len
+                if discrepancy_ratio >= UA_CLOAKING_THRESH:
+                    discrepancies.append(
+                        f"{url} (browser={len_browser} chars, GPTBot={len_ai} chars, {discrepancy_ratio*100:.1f}% discrepancy)"
+                    )
+        except Exception as exc:
+            logger.debug("CR-009 error for %s: %s", url, exc)
+
+    if discrepancies:
+        findings.append(_finding(
+            "CR-009",
+            "User-Agent cloaking or content discrepancy detected for AI crawlers",
+            "high",
+            f"{len(discrepancies)} page(s) served substantially different or degraded content to AI crawlers vs browsers: "
+            + "; ".join(discrepancies[:3]),
+            "Ensure your web server, CDN, and paywall rules serve consistent semantic content to verified AI crawler user-agents. "
+            "Deliberate cloaking or content omission distorts AI brand comprehension.",
+            related=["CR-003", "CR-005"],
+        ))
+
+    return findings
+
+
 # ===================================================================
 # Proactive recommendations
 # ===================================================================
@@ -732,7 +806,7 @@ def _proactive(
 # MAIN ENTRY POINT
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
-    """Execute Crawl & Render Access checks CR-001 -> CR-008.
+    """Execute Crawl & Render Access checks CR-001 -> CR-009.
 
     Returns the standard domain payload **plus** ``crawl_frontier`` and
     ``page_results`` for downstream skills.
@@ -756,6 +830,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_cr005(page_results))
     findings.extend(_check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots))
     findings.extend(_check_cr008(page_results))
+    findings.extend(_check_cr009(frontier, http_client))
 
     # 3. Proactive recommendations
     proactive = _proactive(page_results, target_url)

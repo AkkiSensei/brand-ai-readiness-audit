@@ -362,10 +362,17 @@ def _check_er003(
                 style = (elem.get("style") or "").lower()
                 combined_attrs = f"{classes} {elem_id}"
 
-                # Cookie / GDPR banners
+                # Cookie / GDPR banners — only flag if intrusive full-screen blocking overlay
                 if re.search(r"cookie|gdpr|cc[-_]?banner|consent", combined_attrs):
-                    if url not in cookie_pages:
-                        cookie_pages.append(url)
+                    is_fixed = bool(_FIXED_STYLE_RE.search(style))
+                    is_full = bool(_FULLSCREEN_RE.search(style))
+                    high_z = False
+                    z_match = re.search(r"z-index\s*:\s*(\d+)", style)
+                    if z_match:
+                        high_z = int(z_match.group(1)) > Z_INDEX_THRESH
+                    if is_full or (is_fixed and high_z and ("height: 100%" in style or "height:100%" in style or "inset: 0" in style)):
+                        if url not in cookie_pages:
+                            cookie_pages.append(url)
                     continue
 
                 # Newsletter modals

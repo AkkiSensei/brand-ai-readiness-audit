@@ -381,13 +381,15 @@ def _check_sf003_sf004(
             images_no_alt = pr.soup.find_all(
                 "img", alt=lambda x: x is None or x.strip() == ""
             )
-            # Heuristic: if lots of large images with no alt and low text ratio
+            # Heuristic: if multiple uncaptioned images and page is content-sparse (< 150 words)
             if len(images_no_alt) > 3:
-                text_len = len(visible_text)
-                html_len = len(str(pr.soup))
-                ratio = text_len / html_len if html_len > 0 else 0
-                if ratio < IMG_TEXT_RATIO and url not in img_fact_pages:
-                    img_fact_pages.append(url)
+                words = len(visible_text.split())
+                if words < 150:
+                    text_len = len(visible_text)
+                    html_len = len(str(pr.soup))
+                    ratio = text_len / html_len if html_len > 0 else 0
+                    if ratio < IMG_TEXT_RATIO and url not in img_fact_pages:
+                        img_fact_pages.append(url)
 
             # Canvas elements
             canvas_elems = pr.soup.find_all("canvas")

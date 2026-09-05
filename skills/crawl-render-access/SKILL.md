@@ -70,6 +70,7 @@ a `SkillCoverage` dict.
 | `broken-internal-link`            | medium   | Internal URL returns 4xx or 5xx                  |
 | `excessive-redirect-chain`        | low      | Redirect chain length > 2                        |
 | `http-not-redirected-to-https`    | high     | http:// root does not redirect to https://       |
+| `ua-cloaking-discrepancy`         | high     | Discrepancy between browser and AI-crawler content >= threshold (CR-009) |
 
 ## References
 

@@ -23,6 +23,7 @@ import logging
 import re
 import sys
 import time
+import urllib.parse
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -465,7 +466,9 @@ def run_audit(
     t_start = time.monotonic()
 
     # --- Initialise HTTP client ---
-    client = HttpClient()
+    target_host = urllib.parse.urlparse(target_url).hostname or ""
+    is_local_target = target_host in ("127.0.0.1", "localhost", "::1")
+    client = HttpClient(allow_private_ips=is_local_target)
 
     try:
         return _run_pipeline(target_url, max_pages, timeout_s, client, t_start)

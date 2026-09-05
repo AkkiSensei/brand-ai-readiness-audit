@@ -21,9 +21,12 @@ Design constraints enforced here:
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import os
 import re
+import socket
 import threading
 import time
 import urllib.parse
@@ -78,7 +81,7 @@ DEFAULT_HEADERS: dict = _HTTP_CFG.get(
     {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
     },
 )
 KNOWN_AI_CRAWLERS: list[str] = _ROBOTS_CFG.get(
@@ -91,6 +94,52 @@ PLAYWRIGHT_VIEWPORT: dict = {
     "width": int(_RENDER_CFG.get("playwright_viewport_width", 1280)),
     "height": int(_RENDER_CFG.get("playwright_viewport_height", 800)),
 }
+
+# ---------------------------------------------------------------------------
+# SSRF Disallowed Address Ranges
+# ---------------------------------------------------------------------------
+_DISALLOWED_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),       # Loopback IPv4
+    ipaddress.ip_network("10.0.0.0/8"),        # Private RFC1918
+    ipaddress.ip_network("172.16.0.0/12"),     # Private RFC1918
+    ipaddress.ip_network("192.168.0.0/16"),    # Private RFC1918
+    ipaddress.ip_network("169.254.0.0/16"),    # Link-local / Cloud Metadata (169.254.169.254)
+    ipaddress.ip_network("0.0.0.0/8"),         # Current network
+    ipaddress.ip_network("::1/128"),           # Loopback IPv6
+    ipaddress.ip_network("fc00::/7"),          # Unique local IPv6
+    ipaddress.ip_network("fe80::/10"),         # Link-local IPv6
+]
+
+def is_ssrf_disallowed(hostname_or_ip: str) -> tuple[bool, str]:
+    """Check if a hostname or IP resolves to a private, loopback, link-local, or cloud-metadata address."""
+    if not hostname_or_ip:
+        return False, ""
+    try:
+        # Check if direct IP string
+        try:
+            ip = ipaddress.ip_address(hostname_or_ip)
+            for net in _DISALLOWED_NETWORKS:
+                if ip in net:
+                    return True, f"IP {ip} is in disallowed network {net}"
+            return False, ""
+        except ValueError:
+            pass
+
+        # Check common local names
+        if hostname_or_ip.lower() in ("localhost", "metadata.google.internal"):
+            return True, f"Hostname '{hostname_or_ip}' is a restricted local domain"
+
+        # Resolve hostname via DNS
+        addr_info = socket.getaddrinfo(hostname_or_ip, None)
+        for family, socktype, proto, canonname, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            ip = ipaddress.ip_address(ip_str)
+            for net in _DISALLOWED_NETWORKS:
+                if ip in net:
+                    return True, f"Hostname '{hostname_or_ip}' resolved to disallowed IP {ip} in {net}"
+        return False, ""
+    except Exception:
+        return False, ""
 
 
 # ---------------------------------------------------------------------------
@@ -223,9 +272,15 @@ class RobotsTxtCache:
       - get_sitemaps(url)           — sitemap URLs declared in robots.txt
     """
 
-    def __init__(self, session: requests.Session, rate_limiter: RateLimiter) -> None:
+    def __init__(
+        self,
+        session: requests.Session,
+        rate_limiter: RateLimiter,
+        allow_private_ips: bool = False,
+    ) -> None:
         self._session = session
         self._limiter = rate_limiter
+        self._allow_private_ips = allow_private_ips
         self._cache: dict[str, urllib.robotparser.RobotFileParser] = {}
         self._raw_cache: dict[str, str] = {}
         self._lock = threading.Lock()
@@ -242,6 +297,11 @@ class RobotsTxtCache:
         raw = ""
         try:
             host = urllib.parse.urlparse(origin).hostname or origin
+            if not self._allow_private_ips:
+                blocked, _ = is_ssrf_disallowed(host)
+                if blocked:
+                    parser.allow_all = False
+                    return parser, ""
             self._limiter.wait(host)
             resp = self._session.get(
                 robots_url,
@@ -334,10 +394,24 @@ class HttpClient:
       - All errors captured in PageResult.error — never propagated.
     """
 
-    def __init__(self, rate_limit_secs: float = RATE_LIMIT_SECS) -> None:
+    def __init__(
+        self,
+        rate_limit_secs: float = RATE_LIMIT_SECS,
+        allow_private_ips: Optional[bool] = None,
+        block_private_redirects: bool = True,
+    ) -> None:
+        if allow_private_ips is None:
+            env_val = os.environ.get("ALLOW_PRIVATE_IPS", "").lower()
+            if env_val in ("1", "true", "yes"):
+                allow_private_ips = True
+            else:
+                allow_private_ips = bool(_HTTP_CFG.get("allow_private_ips", False))
+
+        self._allow_private_ips = allow_private_ips
+        self._block_private_redirects = block_private_redirects
         self._limiter = RateLimiter(interval=rate_limit_secs)
         self._session = self._build_session()
-        self.robots = RobotsTxtCache(self._session, self._limiter)
+        self.robots = RobotsTxtCache(self._session, self._limiter, allow_private_ips=self._allow_private_ips)
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
@@ -371,17 +445,9 @@ class HttpClient:
         url: str,
         skip_robots_check: bool = False,
         stream: bool = False,
+        headers: Optional[dict] = None,
     ) -> PageResult:
-        """Perform a rate-limited, robots-compliant HTTP GET.
-
-        Args:
-            url: The absolute URL to fetch.
-            skip_robots_check: If True, bypass robots.txt verification.
-            stream: If True, stream the response (for large files).
-
-        Returns:
-            PageResult populated with response data or an error string.
-        """
+        """Perform a rate-limited, robots-compliant HTTP GET with SSRF and redirect validation."""
         result = PageResult(url=url)
 
         # --- robots.txt check ---
@@ -399,42 +465,118 @@ class HttpClient:
         except Exception as exc:
             logger.debug("Rate limiter error for %s: %s", url, exc)
 
-        # --- HTTP GET ---
+        # --- HTTP GET with SSRF and redirect protection ---
         t0 = time.monotonic()
+        current_url = url
+        redirect_chain: list[str] = []
+        max_redirects = 5
+        resp = None
+
         try:
-            resp = self._session.get(
-                url,
-                timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
-                allow_redirects=True,
-                stream=stream,
-            )
+            for _ in range(max_redirects + 1):
+                parsed = urllib.parse.urlparse(current_url)
+                hostname = parsed.hostname or ""
+
+                # Check SSRF on current_url
+                if not self._allow_private_ips:
+                    disallowed, reason = is_ssrf_disallowed(hostname)
+                    if disallowed:
+                        result.fetch_duration_seconds = time.monotonic() - t0
+                        result.error = f"Blocked by SSRF protection: {reason}"
+                        logger.warning("SSRF blocked: %s (%s)", current_url, reason)
+                        return result
+
+                req_headers = {}
+                if headers:
+                    req_headers.update(headers)
+
+                resp = self._session.get(
+                    current_url,
+                    headers=req_headers if req_headers else None,
+                    timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+                    allow_redirects=False,
+                    stream=True,
+                )
+
+                if resp.is_redirect and "Location" in resp.headers:
+                    redirect_chain.append(current_url)
+                    next_url = urllib.parse.urljoin(current_url, resp.headers["Location"])
+                    next_hostname = urllib.parse.urlparse(next_url).hostname or ""
+
+                    # Check SSRF on redirect target
+                    disallowed, reason = is_ssrf_disallowed(next_hostname)
+                    if disallowed and (not self._allow_private_ips or self._block_private_redirects):
+                        result.fetch_duration_seconds = time.monotonic() - t0
+                        result.error = f"Blocked by SSRF protection on redirect to {next_url}: {reason}"
+                        result.redirect_chain = redirect_chain
+                        logger.warning("SSRF blocked redirect: %s -> %s (%s)", current_url, next_url, reason)
+                        return result
+
+                    current_url = next_url
+                    continue
+                else:
+                    break
+
+            if resp is None:
+                result.error = f"No response received for {url}"
+                return result
+
             result.fetch_duration_seconds = time.monotonic() - t0
             result.status_code = resp.status_code
-            result.url = resp.url  # final URL after redirects
-            result.redirect_chain = [r.url for r in resp.history]
+            result.url = current_url
+            result.redirect_chain = redirect_chain
             result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
             content_type_full = resp.headers.get("Content-Type", "")
             result.content_type = content_type_full.split(";")[0].strip().lower()
 
-            # Read body with size cap
-            if stream:
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in resp.iter_content(chunk_size=65536):
-                    total += len(chunk)
-                    if total > MAX_RESPONSE_BYTES:
-                        break
-                    chunks.append(chunk)
-                raw_bytes = b"".join(chunks)
-            else:
-                raw_bytes = resp.content[:MAX_RESPONSE_BYTES]
+            # Read body with size cap (streaming strictly up to MAX_RESPONSE_BYTES)
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in resp.iter_content(chunk_size=65536):
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    excess = total - MAX_RESPONSE_BYTES
+                    if excess < len(chunk):
+                        chunks.append(chunk[:-excess])
+                    break
+                chunks.append(chunk)
+            raw_bytes = b"".join(chunks)
 
-            # Decode
-            encoding = resp.encoding or "utf-8"
+            # Robust encoding resolution (Content-Type charset, BOM, meta charset, fallbacks)
+            encoding = None
+            if "charset=" in content_type_full.lower():
+                try:
+                    encoding = content_type_full.lower().split("charset=")[-1].split(";")[0].strip().strip("\"'")
+                except Exception:
+                    pass
+
+            if not encoding:
+                if raw_bytes.startswith(b"\xef\xbb\xbf"):
+                    encoding = "utf-8-sig"
+                elif raw_bytes.startswith(b"\xff\xfe"):
+                    encoding = "utf-16-le"
+                elif raw_bytes.startswith(b"\xfe\xff"):
+                    encoding = "utf-16-be"
+
+            if not encoding:
+                meta_head = raw_bytes[:2048].lower()
+                m = re.search(rb'<meta[^>]+charset=["\']?([a-zA-Z0-9_-]+)', meta_head)
+                if m:
+                    try:
+                        encoding = m.group(1).decode("ascii")
+                    except Exception:
+                        pass
+
+            if not encoding:
+                encoding = resp.encoding or "utf-8"
+
             try:
                 result.html = raw_bytes.decode(encoding, errors="replace")
             except (LookupError, UnicodeDecodeError):
-                result.html = raw_bytes.decode("utf-8", errors="replace")
+                try:
+                    result.html = raw_bytes.decode("utf-8", errors="replace")
+                except Exception:
+                    result.html = raw_bytes.decode("latin-1", errors="replace")
 
             # Parse HTML
             if result.content_type in (
@@ -465,27 +607,58 @@ class HttpClient:
         return result
 
     def head(self, url: str) -> PageResult:
-        """Perform a lightweight HTTP HEAD request (no body, no robots check).
-
-        Returns:
-            PageResult with status_code and headers populated.
-        """
+        """Perform a lightweight HTTP HEAD request with SSRF and redirect protection."""
         result = PageResult(url=url)
+        t0 = time.monotonic()
+        current_url = url
+        redirect_chain: list[str] = []
+        max_redirects = 5
+        resp = None
+
         try:
-            self._limiter.wait(self._host(url))
-            t0 = time.monotonic()
-            resp = self._session.head(
-                url,
-                timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
-                allow_redirects=True,
-            )
-            result.fetch_duration_seconds = time.monotonic() - t0
-            result.status_code = resp.status_code
-            result.url = resp.url
-            result.redirect_chain = [r.url for r in resp.history]
-            result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
-            content_type_full = resp.headers.get("Content-Type", "")
-            result.content_type = content_type_full.split(";")[0].strip().lower()
+            for _ in range(max_redirects + 1):
+                parsed = urllib.parse.urlparse(current_url)
+                hostname = parsed.hostname or ""
+
+                if not self._allow_private_ips:
+                    disallowed, reason = is_ssrf_disallowed(hostname)
+                    if disallowed:
+                        result.fetch_duration_seconds = time.monotonic() - t0
+                        result.error = f"HEAD blocked by SSRF protection: {reason}"
+                        return result
+
+                self._limiter.wait(self._host(current_url))
+                resp = self._session.head(
+                    current_url,
+                    timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+                    allow_redirects=False,
+                )
+
+                if resp.is_redirect and "Location" in resp.headers:
+                    redirect_chain.append(current_url)
+                    next_url = urllib.parse.urljoin(current_url, resp.headers["Location"])
+                    next_hostname = urllib.parse.urlparse(next_url).hostname or ""
+
+                    disallowed, reason = is_ssrf_disallowed(next_hostname)
+                    if disallowed and (not self._allow_private_ips or self._block_private_redirects):
+                        result.fetch_duration_seconds = time.monotonic() - t0
+                        result.error = f"HEAD blocked by SSRF protection on redirect to {next_url}: {reason}"
+                        result.redirect_chain = redirect_chain
+                        return result
+
+                    current_url = next_url
+                    continue
+                else:
+                    break
+
+            if resp is not None:
+                result.fetch_duration_seconds = time.monotonic() - t0
+                result.status_code = resp.status_code
+                result.url = current_url
+                result.redirect_chain = redirect_chain
+                result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
+                content_type_full = resp.headers.get("Content-Type", "")
+                result.content_type = content_type_full.split(";")[0].strip().lower()
         except requests.exceptions.Timeout as exc:
             result.error = f"HEAD timeout for {url}: {exc}"
         except requests.exceptions.ConnectionError as exc:
@@ -670,21 +843,23 @@ def normalise_url(url: str, base: str) -> Optional[str]:
 
 
 def extract_text_ratio(soup: BeautifulSoup) -> float:
-    """Compute ratio of visible text length to total HTML length.
+    """Compute ratio of visible text length to cleaned HTML markup length.
 
     Returns a float in [0.0, 1.0]. Lower values suggest heavy JS rendering
-    or content trapped in non-text elements.
+    or content trapped in non-text elements. Non-text elements like script,
+    style, noscript, meta, link, and svg are stripped before comparison.
     """
     try:
-        html_len = len(str(soup))
-        if html_len == 0:
-            return 0.0
-        # Strip script/style/noscript
+        # Strip script/style/noscript/svg/meta/link
         working = BeautifulSoup(str(soup), "html.parser")
-        for tag in working.find_all(["script", "style", "noscript", "meta", "link"]):
+        for tag in working.find_all(["script", "style", "noscript", "meta", "link", "svg"]):
             tag.decompose()
+        clean_html = str(working)
+        clean_len = len(clean_html)
+        if clean_len == 0:
+            return 0.0
         text = working.get_text(separator=" ", strip=True)
-        return min(len(text) / html_len, 1.0)
+        return min(len(text) / clean_len, 1.0)
     except Exception:
         return 0.0
 
