@@ -165,6 +165,36 @@ def _count_fields(block: Any, field_set: set[str]) -> int:
     return count
 
 
+def _find_entities(
+    data: Any,
+    target_types: tuple[str, ...],
+    max_depth: int = 3,
+    current_path: str = "",
+) -> list[tuple[dict, str]]:
+    """Recursively search for objects matching target @type values up to max_depth."""
+    results: list[tuple[dict, str]] = []
+    if not isinstance(data, (dict, list)) or max_depth < 0:
+        return results
+    if isinstance(data, list):
+        for idx, item in enumerate(data):
+            results.extend(_find_entities(item, target_types, max_depth - 1, f"{current_path}[{idx}]"))
+    elif isinstance(data, dict):
+        types = [t.lower() for t in _get_types(data)]
+        for t in types:
+            if t in target_types:
+                results.append((data, current_path or "root"))
+                break
+        for k, v in data.items():
+            if k in (
+                "author", "publisher", "about", "creator", "provider",
+                "founder", "sourceOrganization", "maintainer", "@graph",
+                "item", "hasPart", "isPartOf",
+            ):
+                p = f"{current_path}.{k}" if current_path else k
+                results.extend(_find_entities(v, target_types, max_depth - 1, p))
+    return results
+
+
 # ===================================================================
 # CHECK FUNCTIONS
 # ===================================================================
@@ -173,18 +203,20 @@ def _check_sf001_sf002(
     frontier: list[str],
     page_results: dict[str, PageResult],
 ) -> tuple[list[dict], list[str]]:
-    """SF-001 (high): Missing JSON-LD. SF-002 (medium): Invalid/incomplete JSON-LD."""
+    """SF-001 (high/low): Missing JSON-LD / nested Org. SF-002 (medium): Invalid/incomplete JSON-LD."""
     findings: list[dict] = []
     errors: list[str] = []
     homepage_url = frontier[0] if frontier else ""
     homepage_has_org = False
+    homepage_has_nested_org = False
+    homepage_nested_org_info: list[str] = []
     pages_with_jsonld = 0
     parse_error_urls: list[str] = []
     incomplete_urls: list[str] = []
     missing_fields_detail: list[str] = []
 
     for url in frontier:
-        pr = page_results.get(url)
+        pr = page_results.get(url) or page_results.get(url.rstrip("/")) or page_results.get(url + "/")
         if not pr or not pr.soup:
             continue
         blocks = _extract_jsonld_blocks(pr.soup)
@@ -197,28 +229,42 @@ def _check_sf001_sf002(
                 parse_error_urls.append(url)
                 continue
 
-            types = _get_types(block)
-            for t in types:
-                t_lower = t.lower()
-                if t_lower in ("organization", "localbusiness", "corporation"):
-                    if url == homepage_url or is_homepage(url, homepage_url):
+            is_home = (url == homepage_url or is_homepage(url, homepage_url))
+
+            # Check for organizations (both top-level and nested)
+            org_matches = _find_entities(
+                block, ("organization", "localbusiness", "corporation")
+            )
+            for entity, path in org_matches:
+                if path == "root":
+                    if is_home:
                         homepage_has_org = True
-                    present = _count_fields(block, _ORG_REQUIRED | _ORG_RECOMMENDED)
+                    present = _count_fields(entity, _ORG_REQUIRED | _ORG_RECOMMENDED)
                     if present < MIN_ORG_FIELDS:
                         missing = (
                             _ORG_REQUIRED | _ORG_RECOMMENDED
-                        ) - set(block.keys())
+                        ) - set(entity.keys())
                         incomplete_urls.append(url)
                         missing_fields_detail.append(
                             f"{url}: Organization missing {', '.join(sorted(missing)[:4])}"
                         )
+                else:
+                    if is_home:
+                        homepage_has_nested_org = True
+                        org_name = entity.get("name") or "unnamed"
+                        homepage_nested_org_info.append(f"{path} ({org_name})")
 
-                elif t_lower in ("product", "offer", "service"):
-                    present = _count_fields(block, _PRODUCT_REQUIRED | _PRODUCT_RECOMMENDED)
+            # Check for products/offers/services
+            prod_matches = _find_entities(
+                block, ("product", "offer", "service")
+            )
+            for entity, path in prod_matches:
+                if path == "root":
+                    present = _count_fields(entity, _PRODUCT_REQUIRED | _PRODUCT_RECOMMENDED)
                     if present < MIN_PROD_FIELDS:
                         missing = (
                             _PRODUCT_REQUIRED | _PRODUCT_RECOMMENDED
-                        ) - set(block.keys())
+                        ) - set(entity.keys())
                         incomplete_urls.append(url)
                         missing_fields_detail.append(
                             f"{url}: Product missing {', '.join(sorted(missing)[:4])}"
@@ -236,7 +282,7 @@ def _check_sf001_sf002(
             "(Organization), product pages (Product), and article pages "
             "(Article). This is critical for AI-engine fact extraction.",
         ))
-    elif not homepage_has_org:
+    elif not homepage_has_org and not homepage_has_nested_org:
         findings.append(_finding(
             "SF-001",
             "No Organization schema on homepage",
@@ -246,6 +292,19 @@ def _check_sf001_sf002(
             "identify your brand entity.",
             "Add a JSON-LD Organization block to the homepage with at least "
             "name, url, logo, and sameAs properties.",
+            related=["TC-001"],
+        ))
+    elif not homepage_has_org and homepage_has_nested_org:
+        nested_desc = ", ".join(homepage_nested_org_info[:3])
+        findings.append(_finding(
+            "SF-001",
+            "Organization schema is nested rather than top-level",
+            "low",
+            f"Homepage contains Organization/Corporation schema nested under {nested_desc}, "
+            "but lacks a dedicated top-level Organization entity. While present, nested-only "
+            "declarations can lead to ambiguous brand entity resolution by some AI crawlers.",
+            "Promote the Organization schema to a top-level entity or reference it via @id "
+            "on the homepage to ensure prominent brand recognition by AI search engines.",
             related=["TC-001"],
         ))
 
@@ -748,7 +807,9 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
         for url in frontier:
             try:
                 pr = http_client.get(url)
-                page_results[pr.url or url] = pr
+                page_results[url] = pr
+                if pr.url:
+                    page_results[pr.url] = pr
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
 

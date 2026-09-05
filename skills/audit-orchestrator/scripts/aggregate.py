@@ -360,29 +360,30 @@ def _build_coverage(
                 "checks_run": 0,
                 "errors": 0,
                 "notes": "Domain audit was skipped or failed.",
-                "render_confidence": "low" if low_conf_count > 0 else "high",
-                "pages_with_low_render_confidence": low_conf_count,
+                "render_confidence": "high",
+                "pages_with_low_render_confidence": 0,
             }
         else:
             pages_checked = result.get("pages_analyzed", 0)
+            domain_low_conf = min(low_conf_count, pages_checked) if pages_checked > 0 else 0
             cov_entry: dict[str, Any] = {
                 "pages_checked": pages_checked,
                 "checks_run": len(result.get("findings", [])),
                 "errors": len(result.get("errors", [])),
-                "render_confidence": "low" if low_conf_count > 0 else "high",
-                "pages_with_low_render_confidence": low_conf_count,
+                "render_confidence": "low" if domain_low_conf > 0 else "high",
+                "pages_with_low_render_confidence": domain_low_conf,
             }
-            if low_conf_count > 0:
-                pct = round((low_conf_count / total_pages) * 100)
+            if domain_low_conf > 0:
+                pct = round((domain_low_conf / total_pages) * 100)
                 if schema_key == "crawl_render_access":
                     cov_entry["notes"] = (
-                        f"{low_conf_count} of {total_pages} page(s) ({pct}%) had low render confidence "
+                        f"{domain_low_conf} of {total_pages} page(s) ({pct}%) had low render confidence "
                         "(text blanking detected without successful JS render)."
                     )
                 else:
                     domain_label = schema_key.replace("_", " ")
                     cov_entry["notes"] = (
-                        f"{low_conf_count} of {total_pages} page(s) ({pct}%) had low render confidence; "
+                        f"{domain_low_conf} of {total_pages} page(s) ({pct}%) had low render confidence; "
                         f"{domain_label} checks ran on unrendered content rather than passing verified checks."
                     )
             coverage[schema_key] = cov_entry
@@ -674,8 +675,9 @@ def _run_pipeline(
         "schema_version": "1.0.0",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "target_url": target_url,
-        "pages_audited": sum(
-            (r or {}).get("pages_analyzed", 0) for r in domain_results.values()
+        "pages_audited": (
+            (domain_results.get("crawl-render-access") or {}).get("pages_analyzed")
+            or len(frontier)
         ),
         "audit_duration_seconds": round(elapsed, 2),
         "summary": summary,

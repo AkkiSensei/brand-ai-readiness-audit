@@ -22,9 +22,7 @@ dependencies:
   - lxml>=5.0.0
   - playwright>=1.43.0
 allowed-tools:
-  - Bash
   - Read
-  - Write
 ---
 
 # Engagement & Retention
