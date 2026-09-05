@@ -48,6 +48,9 @@ def _load_thresholds() -> dict:
 
 _T = _load_thresholds()
 _AI_CRAWLERS: list[str] = _T.get("robots", {}).get("known_ai_crawlers", [])
+_HEADING_ID_RATIO_THRESH: float = float(
+    _T.get("proactive", {}).get("heading_id_ratio_threshold", 0.50)
+)
 
 
 # ------------------------------------------------------------------
@@ -277,7 +280,7 @@ def _pa003(
             return None  # Not enough evidence
 
         ratio = headings_with_id / headings_total if headings_total > 0 else 0
-        if ratio >= 0.5:
+        if ratio >= _HEADING_ID_RATIO_THRESH:
             return None  # Reasonable coverage
 
         first_url = next(iter(page_results), "")

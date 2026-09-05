@@ -140,6 +140,44 @@ class PageResult:
     is_rendered: bool = False
     """True if Playwright was used to capture rendered_html."""
 
+    render_confidence: str = "high"
+    """Render confidence for this page: 'high' or 'low'."""
+
+
+class FrontierEntry(str):
+    """An entry in the crawl frontier carrying URL and render confidence.
+
+    Inherits from str for seamless backwards compatibility with string-based
+    consumers, while exposing .render_confidence and dict-like access.
+    """
+    render_confidence: str
+
+    def __new__(cls, url: str, render_confidence: str = "high"):
+        obj = super().__new__(cls, url)
+        obj.render_confidence = render_confidence
+        return obj
+
+    @property
+    def url(self) -> str:
+        return str(self)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        if key == "url":
+            return str(self)
+        if key == "render_confidence":
+            return self.render_confidence
+        return default
+
+    def __getitem__(self, item: Any) -> Any:
+        if item == "url":
+            return str(self)
+        if item == "render_confidence":
+            return self.render_confidence
+        return super().__getitem__(item)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"url": str(self), "render_confidence": self.render_confidence}
+
 
 # ---------------------------------------------------------------------------
 # Rate Limiter

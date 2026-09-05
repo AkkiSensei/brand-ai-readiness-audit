@@ -105,7 +105,17 @@
         "crawl_render_access": { "$ref": "#/definitions/SkillCoverage" },
         "structured_fact_extraction": { "$ref": "#/definitions/SkillCoverage" },
         "trust_entity_corroboration": { "$ref": "#/definitions/SkillCoverage" },
-        "engagement_retention": { "$ref": "#/definitions/SkillCoverage" }
+        "engagement_retention": { "$ref": "#/definitions/SkillCoverage" },
+        "pages_with_low_render_confidence": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of audited pages where content had low render confidence."
+        },
+        "render_confidence": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "description": "Overall render confidence level for the audited site."
+        }
       }
     }
   },
@@ -267,6 +277,15 @@
         },
         "notes": {
           "type": "string"
+        },
+        "render_confidence": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "description": "Render confidence level for this domain."
+        },
+        "pages_with_low_render_confidence": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     }

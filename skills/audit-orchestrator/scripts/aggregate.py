@@ -324,14 +324,28 @@ def _compute_grade(score: float) -> str:
 def _build_coverage(
     domain_results: dict[str, dict | None],
     findings: list[dict],
+    frontier: Optional[list] = None,
 ) -> dict:
-    """Build per-domain SkillCoverage objects."""
-    coverage: dict[str, dict] = {}
+    """Build per-domain SkillCoverage objects and surface render confidence."""
+    coverage: dict[str, Any] = {}
 
-    # Count findings per category
-    findings_per_cat: Counter[str] = Counter()
-    for f in findings:
-        findings_per_cat[f.get("category", "")] += 1
+    crawl_res = domain_results.get("crawl-render-access") or {}
+    crawl_frontier = frontier if frontier is not None else crawl_res.get("crawl_frontier", [])
+    page_results = crawl_res.get("page_results", {})
+
+    low_conf_count = 0
+    for u in crawl_frontier:
+        conf = getattr(u, "render_confidence", None)
+        if conf is None and isinstance(u, dict):
+            conf = u.get("render_confidence")
+        if conf is None and isinstance(u, str) and u in page_results:
+            conf = getattr(page_results[u], "render_confidence", None)
+        if conf == "low":
+            low_conf_count += 1
+
+    total_pages = len(crawl_frontier) if crawl_frontier else max(
+        1, crawl_res.get("pages_discovered", 1)
+    )
 
     for domain_key, schema_key in [
         ("crawl-render-access", "crawl_render_access"),
@@ -346,13 +360,35 @@ def _build_coverage(
                 "checks_run": 0,
                 "errors": 0,
                 "notes": "Domain audit was skipped or failed.",
+                "render_confidence": "low" if low_conf_count > 0 else "high",
+                "pages_with_low_render_confidence": low_conf_count,
             }
         else:
-            coverage[schema_key] = {
-                "pages_checked": result.get("pages_analyzed", 0),
+            pages_checked = result.get("pages_analyzed", 0)
+            cov_entry: dict[str, Any] = {
+                "pages_checked": pages_checked,
                 "checks_run": len(result.get("findings", [])),
                 "errors": len(result.get("errors", [])),
+                "render_confidence": "low" if low_conf_count > 0 else "high",
+                "pages_with_low_render_confidence": low_conf_count,
             }
+            if low_conf_count > 0:
+                pct = round((low_conf_count / total_pages) * 100)
+                if schema_key == "crawl_render_access":
+                    cov_entry["notes"] = (
+                        f"{low_conf_count} of {total_pages} page(s) ({pct}%) had low render confidence "
+                        "(text blanking detected without successful JS render)."
+                    )
+                else:
+                    domain_label = schema_key.replace("_", " ")
+                    cov_entry["notes"] = (
+                        f"{low_conf_count} of {total_pages} page(s) ({pct}%) had low render confidence; "
+                        f"{domain_label} checks ran on unrendered content rather than passing verified checks."
+                    )
+            coverage[schema_key] = cov_entry
+
+    coverage["pages_with_low_render_confidence"] = low_conf_count
+    coverage["render_confidence"] = "low" if low_conf_count > 0 else "high"
 
     return coverage
 
@@ -623,7 +659,7 @@ def _run_pipeline(
     # ==============================================================
     # STEP 13: Coverage
     # ==============================================================
-    coverage = _build_coverage(domain_results, sorted_findings)
+    coverage = _build_coverage(domain_results, sorted_findings, frontier=frontier)
 
     # ==============================================================
     # STEP 14: Proactive recommendation strings

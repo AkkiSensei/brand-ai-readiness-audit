@@ -33,6 +33,7 @@ from http_client import (
     HttpClient,
     PlaywrightRenderer,
     PageResult,
+    FrontierEntry,
     extract_text_ratio,
     normalise_url,
     is_same_origin,
@@ -405,22 +406,36 @@ def _check_cr003_cr004(
 
             # Compare rendered vs raw if Playwright is available
             rendered_ratio: Optional[float] = None
+            rendered_ok = False
             if renderer is not None:
                 try:
                     rr = renderer.render(url)
                     if rr.rendered_soup:
                         rendered_ratio = extract_text_ratio(rr.rendered_soup)
+                        rendered_ok = True
                 except Exception:
                     pass
 
-            effective_ratio = raw_ratio
-            if rendered_ratio is not None and rendered_ratio > raw_ratio:
-                effective_ratio = raw_ratio  # raw is what non-JS crawlers see
+            is_spa = bool(has_app_root and has_module_script and raw_ratio < CSR_WARN_THRESH)
 
-            if effective_ratio < TEXT_BLANK_THRESH:
-                severe.append(f"{url} (ratio={effective_ratio:.2f})")
-            elif effective_ratio < CSR_WARN_THRESH:
-                moderate.append(f"{url} (ratio={effective_ratio:.2f})")
+            if rendered_ok and rendered_ratio is not None and rendered_ratio > raw_ratio:
+                # Playwright execution revealed dynamic content
+                if rendered_ratio >= TEXT_BLANK_THRESH:
+                    moderate.append(f"{url} (raw={raw_ratio:.2f}, rendered={rendered_ratio:.2f})")
+                else:
+                    severe.append(f"{url} (raw={raw_ratio:.2f}, rendered={rendered_ratio:.2f})")
+            else:
+                effective_ratio = raw_ratio
+                if effective_ratio < TEXT_BLANK_THRESH:
+                    severe.append(f"{url} (ratio={effective_ratio:.2f})")
+                elif effective_ratio < CSR_WARN_THRESH:
+                    moderate.append(f"{url} (ratio={effective_ratio:.2f})")
+
+            # Tag render confidence: 'low' when text-blanking detected without successful Playwright render
+            if (raw_ratio < TEXT_BLANK_THRESH or is_spa) and not rendered_ok:
+                pr.render_confidence = "low"
+            else:
+                pr.render_confidence = "high"
 
         if severe or spa_shells:
             combined = list(set(severe + spa_shells))
@@ -756,6 +771,12 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
         "findings": findings,
         "proactive_candidates": proactive,
         # Extra: shared with peer skills
-        "crawl_frontier": frontier,
+        "crawl_frontier": [
+            FrontierEntry(
+                u,
+                render_confidence=getattr(page_results.get(u), "render_confidence", "high"),
+            )
+            for u in frontier
+        ],
         "page_results": page_results,
     }

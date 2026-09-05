@@ -31,11 +31,15 @@ _VALID_CATEGORIES = {
     "engagement_retention",
 }
 _VALID_GRADES = {"A", "B", "C", "D", "F"}
-_COVERAGE_KEYS = {
+_DOMAIN_COVERAGE_KEYS = {
     "crawl_render_access",
     "structured_fact_extraction",
     "trust_entity_corroboration",
     "engagement_retention",
+}
+_COVERAGE_KEYS = _DOMAIN_COVERAGE_KEYS | {
+    "pages_with_low_render_confidence",
+    "render_confidence",
 }
 
 
@@ -159,9 +163,17 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
         if not isinstance(coverage, dict):
             errors.append("coverage must be an object/dict")
         else:
-            for domain_key in _COVERAGE_KEYS:
+            for domain_key in _DOMAIN_COVERAGE_KEYS:
                 if domain_key in coverage:
                     _validate_skill_coverage(coverage[domain_key], domain_key, errors)
+            if "pages_with_low_render_confidence" in coverage and not isinstance(
+                coverage["pages_with_low_render_confidence"], int
+            ):
+                errors.append("coverage.pages_with_low_render_confidence must be an integer")
+            if "render_confidence" in coverage and coverage["render_confidence"] not in {
+                "high", "medium", "low"
+            }:
+                errors.append(f"coverage.render_confidence must be one of high, medium, low")
             extra_keys = set(coverage.keys()) - _COVERAGE_KEYS
             if extra_keys:
                 errors.append(f"coverage has unexpected keys: {extra_keys}")
@@ -260,7 +272,14 @@ def _validate_skill_coverage(cov: Any, domain: str, errors: list[str]) -> None:
             errors.append(f"{prefix}.{key} must be an integer")
     if "notes" in cov and not isinstance(cov["notes"], str):
         errors.append(f"{prefix}.notes must be a string")
-    allowed = {"pages_checked", "checks_run", "errors", "notes"}
+    allowed = {
+        "pages_checked",
+        "checks_run",
+        "errors",
+        "notes",
+        "render_confidence",
+        "pages_with_low_render_confidence",
+    }
     extra = set(cov.keys()) - allowed
     if extra:
         errors.append(f"{prefix} has unexpected keys: {extra}")

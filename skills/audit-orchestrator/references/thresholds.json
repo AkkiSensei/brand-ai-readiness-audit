@@ -31,6 +31,7 @@
 
   "render": {
     "text_blanking_ratio_threshold": 0.15,
+    "csr_text_ratio_warning_$comment": "Set to 0.30 (not 0.50) to prevent false-positive CR-004 warnings on markup-heavy static/legacy pages (e.g. 3_legacy.html fixture with text ratio ~0.44 has zero CSR, but would trigger under 0.50). 0.30 cleanly isolates real SPA shells like 1_spa.html (ratio 0.02).",
     "csr_text_ratio_warning": 0.30,
     "playwright_wait_ms": 3000,
     "playwright_viewport_width": 1280,
@@ -108,5 +109,9 @@
       "D": 40,
       "F": 0
     }
+  },
+
+  "proactive": {
+    "heading_id_ratio_threshold": 0.50
   }
 }
