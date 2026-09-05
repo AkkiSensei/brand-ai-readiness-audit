@@ -65,9 +65,9 @@ Z_INDEX_THRESH: int = int(_ENG.get("interstitial_z_index_threshold", 100))
 INTERSTITIAL_DELAY_MS: int = int(_ENG.get("interstitial_delay_ms_threshold", 2000))
 VIEWPORT_WAIT_MS: int = int(_ENG.get("viewport_stable_wait_ms", 1500))
 
-BROKEN_LINK_SAMPLE_SIZE: int = 25
-BROKEN_LINK_RATIO_THRESHOLD: float = 0.05
-SEARCH_PAGE_THRESHOLD: int = 30
+BROKEN_LINK_SAMPLE_SIZE: int = int(_ENG.get("broken_link_sample_size", 25))
+BROKEN_LINK_RATIO_THRESHOLD: float = float(_ENG.get("broken_link_ratio_threshold", 0.05))
+SEARCH_PAGE_THRESHOLD: int = int(_ENG.get("search_page_threshold", 30))
 
 # Overlay / interstitial CSS and class patterns
 _OVERLAY_CLASS_RE = re.compile(

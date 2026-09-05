@@ -81,7 +81,10 @@
     "cls_threshold": 0.10,
     "interstitial_z_index_threshold": 100,
     "interstitial_delay_ms_threshold": 2000,
-    "viewport_stable_wait_ms": 1500
+    "viewport_stable_wait_ms": 1500,
+    "broken_link_sample_size": 25,
+    "broken_link_ratio_threshold": 0.05,
+    "search_page_threshold": 30
   },
 
   "scoring": {

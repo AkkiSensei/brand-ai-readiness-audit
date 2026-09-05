@@ -19,6 +19,10 @@ dependencies:
   - requests>=2.31.0
   - beautifulsoup4>=4.12.0
   - lxml>=5.0.0
+allowed-tools:
+  - Bash
+  - Read
+  - Write
 ---
 
 # Structured Fact Extraction
