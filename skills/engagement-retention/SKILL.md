@@ -21,8 +21,7 @@ dependencies:
   - beautifulsoup4>=4.12.0
   - lxml>=5.0.0
   - playwright>=1.43.0
-allowed-tools:
-  - Read
+allowed-tools: Read
 ---
 
 # Engagement & Retention

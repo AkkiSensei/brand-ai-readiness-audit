@@ -20,8 +20,7 @@ dependencies:
   - requests>=2.31.0
   - beautifulsoup4>=4.12.0
   - lxml>=5.0.0
-allowed-tools:
-  - Read
+allowed-tools: Read
 ---
 
 # Crawl & Render Access

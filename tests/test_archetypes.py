@@ -54,6 +54,7 @@ warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
 
 class ArchetypeRequestHandler(http.server.SimpleHTTPRequestHandler):
     """Serves test fixtures and deterministic minimal robots.txt / sitemap.xml."""
+    active_fixture: str = "1_spa.html"
 
     def __init__(self, *args, directory: Optional[str] = None, **kwargs):
         if directory is None:
@@ -77,14 +78,11 @@ class ArchetypeRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if self.path == "/sitemap.xml":
             host_header = self.headers.get("Host", "127.0.0.1")
+            fixture = getattr(ArchetypeRequestHandler, "active_fixture", "1_spa.html")
             xml = (
                 f'<?xml version="1.0" encoding="UTF-8"?>\n'
                 f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-                f'  <url><loc>http://{host_header}/1_spa.html</loc><lastmod>2026-08-15</lastmod></url>\n'
-                f'  <url><loc>http://{host_header}/2_ecommerce.html</loc><lastmod>2026-08-15</lastmod></url>\n'
-                f'  <url><loc>http://{host_header}/3_legacy.html</loc><lastmod>2026-08-15</lastmod></url>\n'
-                f'  <url><loc>http://{host_header}/4_blog.html</loc><lastmod>2026-08-15</lastmod></url>\n'
-                f'  <url><loc>http://{host_header}/5_paywall.html</loc><lastmod>2026-08-15</lastmod></url>\n'
+                f'  <url><loc>http://{host_header}/{fixture}</loc><lastmod>2026-08-15</lastmod></url>\n'
                 f'</urlset>\n'
             ).encode("utf-8")
             self.send_response(200)
@@ -187,6 +185,7 @@ def run_archetype_matrix() -> int:
         # [1/5] SPA
         # -------------------------------------------------------------
         spa_file = "1_spa.html"
+        ArchetypeRequestHandler.active_fixture = spa_file
         spa_url = f"http://127.0.0.1:{port}/{spa_file}"
         t0 = time.time()
         client = HttpClient()
@@ -215,6 +214,7 @@ def run_archetype_matrix() -> int:
         # [2/5] E-commerce
         # -------------------------------------------------------------
         ecom_file = "2_ecommerce.html"
+        ArchetypeRequestHandler.active_fixture = ecom_file
         ecom_url = f"http://127.0.0.1:{port}/{ecom_file}"
         t0 = time.time()
         client = HttpClient()
@@ -228,7 +228,8 @@ def run_archetype_matrix() -> int:
 
         group1 = ("SF-003" in ecom_rules or "SF-004" in ecom_rules)
         group2 = ("SF-001" in ecom_rules or "SF-002" in ecom_rules)
-        ecom_pass = group1 and group2 and ecom_schema_valid
+        ecom_no_cr = ("CR-003" not in ecom_rules and "CR-004" not in ecom_rules)
+        ecom_pass = group1 and group2 and ecom_no_cr and ecom_schema_valid
         if ecom_pass:
             passed_count += 1
 
@@ -239,6 +240,7 @@ def run_archetype_matrix() -> int:
         print(f"  Expected:")
         print(f"    - SF-003 OR SF-004")
         print(f"    - SF-001 OR SF-002")
+        print(f"    - CR-003/CR-004 absent")
         print(f"  Detected: {ecom_rules}")
         print(f"  Schema: {'PASS' if ecom_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if ecom_pass else 'FAIL'}")
@@ -247,6 +249,7 @@ def run_archetype_matrix() -> int:
         # [3/5] Legacy
         # -------------------------------------------------------------
         legacy_file = "3_legacy.html"
+        ArchetypeRequestHandler.active_fixture = legacy_file
         legacy_url = f"http://127.0.0.1:{port}/{legacy_file}"
         t0 = time.time()
         client = HttpClient()
@@ -260,7 +263,8 @@ def run_archetype_matrix() -> int:
 
         leg_g1 = ("ER-006" in legacy_rules or "ER-007" in legacy_rules)
         leg_g2 = ("TC-001" in legacy_rules or "TC-006" in legacy_rules)
-        legacy_pass = leg_g1 and leg_g2 and legacy_schema_valid
+        leg_no_cr = ("CR-003" not in legacy_rules and "CR-004" not in legacy_rules)
+        legacy_pass = leg_g1 and leg_g2 and leg_no_cr and legacy_schema_valid
         if legacy_pass:
             passed_count += 1
 
@@ -271,6 +275,7 @@ def run_archetype_matrix() -> int:
         print(f"  Expected:")
         print(f"    - ER-006 OR ER-007")
         print(f"    - TC-001 OR TC-006")
+        print(f"    - CR-003/CR-004 absent")
         print(f"  Detected: {legacy_rules}")
         print(f"  Schema: {'PASS' if legacy_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if legacy_pass else 'FAIL'}")
@@ -279,6 +284,7 @@ def run_archetype_matrix() -> int:
         # [4/5] Blog
         # -------------------------------------------------------------
         blog_file = "4_blog.html"
+        ArchetypeRequestHandler.active_fixture = blog_file
         blog_url = f"http://127.0.0.1:{port}/{blog_file}"
         t0 = time.time()
         client = HttpClient()
@@ -292,7 +298,8 @@ def run_archetype_matrix() -> int:
 
         blog_pos = ("SF-006" in blog_rules)
         blog_neg = ("SF-007" not in blog_rules)
-        blog_pass = blog_pos and blog_neg and blog_schema_valid
+        blog_no_cr = ("CR-003" not in blog_rules and "CR-004" not in blog_rules)
+        blog_pass = blog_pos and blog_neg and blog_no_cr and blog_schema_valid
         if not blog_neg:
             false_positive_regressions += 1
         if blog_pass:
@@ -303,7 +310,7 @@ def run_archetype_matrix() -> int:
         print(f"  URL: {blog_url}")
         print(f"  Duration: {blog_duration}s")
         print(f"  Expected positive: SF-006")
-        print(f"  Expected negative: SF-007 absent")
+        print(f"  Expected negative: SF-007 absent, CR-003/CR-004 absent")
         print(f"  Detected: {blog_rules}")
         print(f"  Schema: {'PASS' if blog_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if blog_pass else 'FAIL'}")
@@ -312,6 +319,7 @@ def run_archetype_matrix() -> int:
         # [5/5] Paywall
         # -------------------------------------------------------------
         paywall_file = "5_paywall.html"
+        ArchetypeRequestHandler.active_fixture = paywall_file
         paywall_url = f"http://127.0.0.1:{port}/{paywall_file}"
         t0 = time.time()
         client = HttpClient()
@@ -323,7 +331,11 @@ def run_archetype_matrix() -> int:
         if not paywall_schema_valid:
             schema_all_passed = False
 
-        paywall_pass = ("ER-003" in paywall_rules or "CR-005" in paywall_rules) and paywall_schema_valid
+        paywall_pass = (
+            ("ER-003" in paywall_rules or "CR-005" in paywall_rules)
+            and ("CR-003" not in paywall_rules and "CR-004" not in paywall_rules)
+            and paywall_schema_valid
+        )
         if paywall_pass:
             passed_count += 1
 
@@ -331,7 +343,7 @@ def run_archetype_matrix() -> int:
         print(f"  Fixture: {paywall_file}")
         print(f"  URL: {paywall_url}")
         print(f"  Duration: {paywall_duration}s")
-        print(f"  Expected: ER-003 OR CR-005")
+        print(f"  Expected: ER-003 OR CR-005 (CR-003/CR-004 absent)")
         print(f"  Detected: {paywall_rules}")
         print(f"  Schema: {'PASS' if paywall_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if paywall_pass else 'FAIL'}")
