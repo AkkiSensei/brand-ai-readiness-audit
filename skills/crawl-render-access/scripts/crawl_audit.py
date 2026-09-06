@@ -390,9 +390,10 @@ def _check_cr003_cr004(
     """CR-003 (critical) / CR-004 (high): SSR-vs-CSR text blanking."""
     findings: list[dict] = []
     try:
-        severe: list[str] = []
-        moderate: list[str] = []
-        spa_shells: list[str] = []
+        severe_urls: set[str] = set()
+        moderate_urls: set[str] = set()
+        spa_shell_urls: set[str] = set()
+        display: dict[str, str] = {}
 
         for url, pr in page_results.items():
             if pr.soup is None:
@@ -421,7 +422,8 @@ def _check_cr003_cr004(
             )
             is_spa = bool(has_app_root and has_module_script and word_count < 80)
             if is_spa and raw_ratio < CSR_WARN_THRESH:
-                spa_shells.append(url)
+                spa_shell_urls.add(url)
+                display.setdefault(url, f"{url} (SPA shell)")
 
             # Compare rendered vs raw if Playwright is available
             rendered_ratio: Optional[float] = None
@@ -439,17 +441,23 @@ def _check_cr003_cr004(
 
             if rendered_ok and rendered_ratio is not None and rendered_ratio > raw_ratio:
                 # Playwright execution revealed dynamic content
+                disp = f"{url} (raw={raw_ratio:.2f}, rendered={rendered_ratio:.2f})"
                 if rendered_ratio >= TEXT_BLANK_THRESH:
-                    moderate.append(f"{url} (raw={raw_ratio:.2f}, rendered={rendered_ratio:.2f})")
+                    moderate_urls.add(url)
+                    display[url] = disp
                 else:
-                    severe.append(f"{url} (raw={raw_ratio:.2f}, rendered={rendered_ratio:.2f})")
+                    severe_urls.add(url)
+                    display[url] = disp
             else:
                 effective_ratio = raw_ratio
                 if not has_substantial_text:
+                    disp = f"{url} (ratio={effective_ratio:.2f})"
                     if effective_ratio < TEXT_BLANK_THRESH and (word_count < 80 or is_spa):
-                        severe.append(f"{url} (ratio={effective_ratio:.2f})")
+                        severe_urls.add(url)
+                        display[url] = disp
                     elif effective_ratio < CSR_WARN_THRESH or (effective_ratio < TEXT_BLANK_THRESH and word_count < 250):
-                        moderate.append(f"{url} (ratio={effective_ratio:.2f})")
+                        moderate_urls.add(url)
+                        display[url] = disp
 
             # Tag render confidence: 'low' when text-blanking detected without successful Playwright render
             has_blanking = (not has_substantial_text) and (raw_ratio < TEXT_BLANK_THRESH or is_spa)
@@ -459,33 +467,36 @@ def _check_cr003_cr004(
                 pr.render_confidence = "high"
 
         total_checked = len(page_results)
-        if severe or spa_shells:
-            combined = list(set(severe + spa_shells))
+        combined_urls = severe_urls | spa_shell_urls
+        if combined_urls:
+            evidence_strs = [display.get(u, u) for u in sorted(combined_urls)[:5]]
             findings.append(_finding(
                 "CR-003",
                 "Severe CSR text blanking — content invisible to non-JS crawlers",
                 "critical",
-                f"{len(combined)} page(s) have critically low text-to-HTML ratio "
-                f"(< {TEXT_BLANK_THRESH}): " + "; ".join(combined[:5]),
+                f"{len(combined_urls)} page(s) have critically low text-to-HTML ratio "
+                f"(< {TEXT_BLANK_THRESH}): " + "; ".join(evidence_strs),
                 "Implement server-side rendering (SSR) or static-site generation "
                 "(SSG) so content is available in the initial HTML response. "
                 "Ensure critical text is not loaded exclusively via client-side "
                 "JavaScript.",
                 related=["CR-004"],
-                pages_affected=len(combined),
+                pages_affected=len(combined_urls),
                 pages_checked=total_checked,
             ))
-        if moderate:
+        moderate_final = moderate_urls - combined_urls
+        if moderate_final:
+            evidence_strs = [display.get(u, u) for u in sorted(moderate_final)[:5]]
             findings.append(_finding(
                 "CR-004",
                 "Moderate CSR text blanking — reduced content in raw HTML",
                 "high",
-                f"{len(moderate)} page(s) have low text ratio "
-                f"(< {CSR_WARN_THRESH}): " + "; ".join(moderate[:5]),
+                f"{len(moderate_final)} page(s) have low text ratio "
+                f"(< {CSR_WARN_THRESH}): " + "; ".join(evidence_strs),
                 "Review pages for JS-dependent content rendering. Consider "
                 "pre-rendering or dynamic rendering for AI crawlers.",
                 related=["CR-003"],
-                pages_affected=len(moderate),
+                pages_affected=len(moderate_final),
                 pages_checked=total_checked,
             ))
     except Exception as exc:
