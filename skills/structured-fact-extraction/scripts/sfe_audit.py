@@ -1,7 +1,7 @@
 """
 sfe_audit.py
 ============
-Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-010)
+Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-011)
 
 Validates Schema.org JSON-LD markup, detects facts trapped in images/canvas/PDFs,
 and inspects document freshness metadata across the crawl frontier.
@@ -827,6 +827,110 @@ def _check_sf010(page_results: dict[str, PageResult]) -> list[dict]:
     return findings
 
 
+def _is_present_and_non_empty(val: Any) -> bool:
+    """Check if a field value is present and non-empty."""
+    if val is None:
+        return False
+    if isinstance(val, (str, list, dict)):
+        return len(val) > 0 and (not isinstance(val, str) or val.strip() != "")
+    return True
+
+
+def _check_offer_dict(offer_dict: dict) -> bool:
+    """Check if an Offer dictionary contains both priceValidUntil and availability."""
+    if not isinstance(offer_dict, dict):
+        return False
+    has_pvu = _is_present_and_non_empty(offer_dict.get("priceValidUntil"))
+    has_avail = _is_present_and_non_empty(offer_dict.get("availability"))
+    if has_pvu and has_avail:
+        return True
+    nested = offer_dict.get("offers")
+    if isinstance(nested, dict):
+        return _check_offer_dict(nested)
+    if isinstance(nested, list) and nested:
+        return all(_check_offer_dict(o) for o in nested if isinstance(o, dict))
+    return False
+
+
+def _node_has_valid_offer(node: dict) -> bool:
+    """Check whether a Product/Offer node has valid priceValidUntil and availability in its Offer."""
+    if not isinstance(node, dict):
+        return False
+    offers = node.get("offers")
+    if offers is not None and offers != "" and offers != []:
+        if isinstance(offers, dict):
+            return _check_offer_dict(offers)
+        if isinstance(offers, list):
+            offer_dicts = [o for o in offers if isinstance(o, dict)]
+            if not offer_dicts:
+                return False
+            return all(_check_offer_dict(o) for o in offer_dicts)
+        return False
+    node_types = [t.lower() for t in _get_types(node)]
+    if "offer" in node_types:
+        return _check_offer_dict(node)
+    return False
+
+
+def _check_sf011(page_results: dict[str, PageResult]) -> list[dict]:
+    """SF-011 (medium): Product/Offer schema missing price validity or availability."""
+    findings: list[dict] = []
+    try:
+        total_count = 0
+        missing_count = 0
+        seen_prs: set[int] = set()
+
+        for url, pr in page_results.items():
+            if not pr or not pr.soup:
+                continue
+            pr_id = id(pr)
+            if pr_id in seen_prs:
+                continue
+            seen_prs.add(pr_id)
+
+            blocks = _extract_jsonld_blocks(pr.soup)
+            if not blocks:
+                continue
+
+            for block in blocks:
+                if block.get("_parse_error") or not isinstance(block, dict):
+                    continue
+
+                nodes: list[dict] = []
+                seen_node_ids: set[int] = set()
+
+                block_types = [t.lower() for t in _get_types(block)]
+                if any(t in ("product", "offer") for t in block_types) or "offers" in block:
+                    nodes.append(block)
+                    seen_node_ids.add(id(block))
+
+                for entity, _ in _find_entities(block, ("product", "offer")):
+                    if id(entity) not in seen_node_ids:
+                        nodes.append(entity)
+                        seen_node_ids.add(id(entity))
+
+                for node in nodes:
+                    total_count += 1
+                    if not _node_has_valid_offer(node):
+                        missing_count += 1
+
+        if total_count > 0 and missing_count > total_count / 2:
+            findings.append(_finding(
+                "SF-011",
+                "Product/Offer schema missing price validity or availability",
+                "medium",
+                f"{missing_count} of {total_count} Product/Offer schema blocks lack "
+                f"priceValidUntil and/or availability.",
+                "Add priceValidUntil and availability (schema.org/ItemAvailability "
+                "values like InStock/OutOfStock) to every Offer block. Assistants "
+                "citing pricing need to know it's current — stale or ambiguous "
+                "availability makes them hedge or omit the price entirely.",
+            ))
+    except Exception as exc:
+        logger.debug("SF-011 error: %s", exc)
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Date parsing helpers
 # ---------------------------------------------------------------------------
@@ -925,7 +1029,7 @@ def _proactive(frontier: list[str], page_results: dict[str, PageResult]) -> list
 # MAIN ENTRY POINT
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
-    """Execute Structured Fact Extraction checks SF-001 -> SF-010."""
+    """Execute Structured Fact Extraction checks SF-001 -> SF-011."""
     import urllib.parse  # ensure available for is_homepage
 
     frontier: list[str] = kwargs.get("crawl_frontier", [target_url])
@@ -954,6 +1058,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_sf007_sf008(frontier, page_results))
     findings.extend(_check_sf009(page_results))
     findings.extend(_check_sf010(page_results))
+    findings.extend(_check_sf011(page_results))
 
     proactive = _proactive(frontier, page_results)
 
