@@ -276,6 +276,12 @@
           "type": "string",
           "description": "If set, this finding was deduplicated and is equivalent to the finding with this ID.",
           "pattern": "^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Proportion of audited pages affected by this finding (pages_affected / pages_checked)."
         }
       }
     },

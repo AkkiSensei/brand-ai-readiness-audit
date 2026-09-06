@@ -89,8 +89,10 @@ def _finding(
     evidence: str,
     action: str,
     related: list[str] | None = None,
+    pages_affected: int | None = None,
+    pages_checked: int | None = None,
 ) -> dict:
-    return {
+    d = {
         "local_id": local_id,
         "title": title,
         "severity": severity,
@@ -99,6 +101,11 @@ def _finding(
         "suggested_action": {"summary": action, "priority": severity},
         "related_to": related or [],
     }
+    if pages_affected is not None:
+        d["pages_affected"] = pages_affected
+    if pages_checked is not None:
+        d["pages_checked"] = pages_checked
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +561,8 @@ def _check_sf006(
                 "without FAQPage JSON-LD markup: " + "; ".join(qa_pages[:5]),
                 "Add FAQPage structured data to pages with Q&A content. This "
                 "enables rich results and improves AI-engine FAQ extraction.",
+                pages_affected=len(qa_pages),
+                pages_checked=len(frontier),
             ))
 
     except Exception as exc:
@@ -652,6 +661,8 @@ def _check_sf007_sf008(
                 f"{STALE_DAYS} days: " + "; ".join(stale_pages[:5]),
                 "Update content freshness signals (dateModified in JSON-LD, "
                 "Last-Modified header, or meta tags) when content is revised.",
+                pages_affected=len(stale_pages),
+                pages_checked=len(frontier),
             ))
 
         if no_freshness and len(no_freshness) > len(frontier) * 0.5:
@@ -664,6 +675,8 @@ def _check_sf007_sf008(
                 "Add datePublished and dateModified properties to JSON-LD "
                 "structured data or use <meta> property tags.",
                 related=["SF-002"],
+                pages_affected=len(no_freshness),
+                pages_checked=len(frontier),
             ))
 
         # SF-008: Duplicate titles
@@ -762,6 +775,7 @@ def _check_sf009(page_results: dict[str, PageResult]) -> list[dict]:
 
         # 4. Emit finding if duplicates found
         if duplicate_pairs:
+            dup_pages = {u for pair in duplicate_pairs for u in pair}
             findings.append(_finding(
                 "SF-009",
                 "Near-duplicate content across pages",
@@ -775,6 +789,8 @@ def _check_sf009(page_results: dict[str, PageResult]) -> list[dict]:
                 "systems deduplicate similar pages before citing, so "
                 "duplicates compete with each other for the same citation "
                 "slot instead of both being cited.",
+                pages_affected=len(dup_pages),
+                pages_checked=len(page_results),
             ))
     except Exception as exc:
         logger.debug("SF-009 error: %s", exc)
@@ -821,6 +837,8 @@ def _check_sf010(page_results: dict[str, PageResult]) -> list[dict]:
                 "Add Open Graph and Twitter Card meta tags to every page. "
                 "Some AI assistants (e.g. web-browsing modes) use these as "
                 "a fallback snippet source when JSON-LD is absent or thin.",
+                pages_affected=missing_both_count,
+                pages_checked=total,
             ))
     except Exception as exc:
         logger.debug("SF-010 error: %s", exc)
@@ -925,6 +943,8 @@ def _check_sf011(page_results: dict[str, PageResult]) -> list[dict]:
                 "values like InStock/OutOfStock) to every Offer block. Assistants "
                 "citing pricing need to know it's current — stale or ambiguous "
                 "availability makes them hedge or omit the price entirely.",
+                pages_affected=missing_count,
+                pages_checked=total_count,
             ))
     except Exception as exc:
         logger.debug("SF-011 error: %s", exc)
@@ -1008,6 +1028,8 @@ def _check_sf012(page_results: dict[str, PageResult]) -> list[dict]:
                 "Add HowTo schema to instructional content so AI assistants "
                 "can extract and cite individual steps directly, the same "
                 "way FAQPage schema helps with Q&A content.",
+                pages_affected=count,
+                pages_checked=len(seen_prs),
             ))
 
     except Exception as exc:

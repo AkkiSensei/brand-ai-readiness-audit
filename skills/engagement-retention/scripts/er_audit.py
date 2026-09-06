@@ -134,8 +134,10 @@ def _finding(
     evidence: str,
     action: str,
     related: list[str] | None = None,
+    pages_affected: int | None = None,
+    pages_checked: int | None = None,
 ) -> dict:
-    return {
+    d = {
         "local_id": local_id,
         "title": title,
         "severity": severity,
@@ -144,6 +146,11 @@ def _finding(
         "suggested_action": {"summary": action, "priority": severity},
         "related_to": related or [],
     }
+    if pages_affected is not None:
+        d["pages_affected"] = pages_affected
+    if pages_checked is not None:
+        d["pages_checked"] = pages_checked
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +246,8 @@ def _check_er001(
                 "should appear above the fold and summarise the page topic "
                 "for both users and AI crawlers.",
                 related=["CR-003"],
+                pages_affected=len(missing_h1),
+                pages_checked=len(frontier),
             ))
 
         if missing_nav:
@@ -251,6 +260,8 @@ def _check_er001(
                 + "; ".join(missing_nav[:5]),
                 "Add semantic <nav> elements with at least "
                 f"{NAV_MIN_LINKS} internal links for site-wide navigation.",
+                pages_affected=len(missing_nav),
+                pages_checked=len(frontier),
             ))
 
         if multiple_h1:
@@ -262,6 +273,8 @@ def _check_er001(
                 + "; ".join(multiple_h1[:5]),
                 "Use a single <h1> per page. Use <h2>-<h6> for sub-sections "
                 "to maintain a clear heading hierarchy.",
+                pages_affected=len(multiple_h1),
+                pages_checked=len(frontier),
             ))
 
     except Exception as exc:

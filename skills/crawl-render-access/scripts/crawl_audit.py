@@ -93,9 +93,11 @@ def _finding(
     evidence: str,
     action: str,
     related: list[str] | None = None,
+    pages_affected: int | None = None,
+    pages_checked: int | None = None,
 ) -> dict:
     """Return a finding dict conforming to the shared domain contract."""
-    return {
+    d = {
         "local_id": local_id,
         "title": title,
         "severity": severity,
@@ -104,6 +106,11 @@ def _finding(
         "suggested_action": {"summary": action, "priority": severity},
         "related_to": related or [],
     }
+    if pages_affected is not None:
+        d["pages_affected"] = pages_affected
+    if pages_checked is not None:
+        d["pages_checked"] = pages_checked
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +458,7 @@ def _check_cr003_cr004(
             else:
                 pr.render_confidence = "high"
 
+        total_checked = len(page_results)
         if severe or spa_shells:
             combined = list(set(severe + spa_shells))
             findings.append(_finding(
@@ -464,6 +472,8 @@ def _check_cr003_cr004(
                 "Ensure critical text is not loaded exclusively via client-side "
                 "JavaScript.",
                 related=["CR-004"],
+                pages_affected=len(combined),
+                pages_checked=total_checked,
             ))
         if moderate:
             findings.append(_finding(
@@ -475,6 +485,8 @@ def _check_cr003_cr004(
                 "Review pages for JS-dependent content rendering. Consider "
                 "pre-rendering or dynamic rendering for AI crawlers.",
                 related=["CR-003"],
+                pages_affected=len(moderate),
+                pages_checked=total_checked,
             ))
     except Exception as exc:
         logger.debug("CR-003/004 error: %s", exc)
@@ -532,6 +544,8 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                 "metered access with first-click-free for crawler user-agents, "
                 "or use structured data (CreativeWork with isAccessibleForFree).",
                 related=["CR-003"],
+                pages_affected=len(flagged),
+                pages_checked=len(page_results),
             ))
     except Exception as exc:
         logger.debug("CR-005 error: %s", exc)
@@ -680,6 +694,8 @@ def _check_cr008(page_results: dict[str, PageResult]) -> list[dict]:
                 "Remove noindex directives from pages you want AI engines to "
                 "discover. If pages should genuinely be excluded, ensure they "
                 "are not linked from navigation or sitemaps.",
+                pages_affected=len(noindex_pages),
+                pages_checked=len(page_results),
             ))
     except Exception as exc:
         logger.debug("CR-008 error: %s", exc)

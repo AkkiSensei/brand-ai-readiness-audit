@@ -153,7 +153,7 @@ def _normalise_finding(raw: dict, domain_name: str, target_url: str) -> dict:
     else:
         suggested_action = {"summary": "Review and address this finding.", "priority": severity}
 
-    return {
+    finding = {
         "_local_id": raw.get("local_id", ""),
         "local_id": raw.get("local_id", ""),
         "_domain": domain_name,
@@ -166,6 +166,17 @@ def _normalise_finding(raw: dict, domain_name: str, target_url: str) -> dict:
         "suggested_action": suggested_action,
         "related_to": [],
     }
+
+    pages_affected = raw.get("pages_affected")
+    pages_checked = raw.get("pages_checked")
+    if (
+        pages_affected is not None
+        and pages_checked is not None
+        and pages_checked > 0
+    ):
+        finding["confidence"] = round(pages_affected / pages_checked, 2)
+
+    return finding
 
 
 # ===================================================================

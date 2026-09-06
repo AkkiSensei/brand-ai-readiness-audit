@@ -98,8 +98,10 @@ def _finding(
     evidence: str,
     action: str,
     related: list[str] | None = None,
+    pages_affected: int | None = None,
+    pages_checked: int | None = None,
 ) -> dict:
-    return {
+    d = {
         "local_id": local_id,
         "title": title,
         "severity": severity,
@@ -108,6 +110,11 @@ def _finding(
         "suggested_action": {"summary": action, "priority": severity},
         "related_to": related or [],
     }
+    if pages_affected is not None:
+        d["pages_affected"] = pages_affected
+    if pages_checked is not None:
+        d["pages_checked"] = pages_checked
+    return d
 
 
 # ---------------------------------------------------------------------------
