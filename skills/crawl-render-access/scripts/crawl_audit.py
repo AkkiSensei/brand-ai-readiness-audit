@@ -1,7 +1,7 @@
 """
 crawl_audit.py
 ==============
-Domain sub-skill: Crawl & Render Access (CR-001 -> CR-008)
+Domain sub-skill: Crawl & Render Access (CR-001 -> CR-010)
 
 Discovers the site crawl frontier (homepage + sitemap + internal links up to
 max_pages) and audits for AI-crawler accessibility issues.
@@ -746,6 +746,63 @@ def _check_cr009(frontier: list[str], client: HttpClient) -> list[dict]:
     return findings
 
 
+# Compiled once — locale-style path segments
+_LOCALE_PATH_RE = re.compile(
+    r"/(en|fr|de|es|it|pt|ja|zh|ar|hi)(-[A-Z]{2})?/"
+)
+
+
+def _check_cr010(page_results: dict[str, PageResult]) -> list[dict]:
+    """CR-010 (medium): Multilingual content without hreflang tags."""
+    findings: list[dict] = []
+    try:
+        # 1. Collect distinct locale signals from <html lang> attributes
+        distinct_locales: set[str] = set()
+        has_hreflang = False
+
+        for url, pr in page_results.items():
+            if not pr.soup:
+                continue
+
+            # Inspect <html lang="..."> attribute
+            html_tag = pr.soup.find("html")
+            if html_tag:
+                lang = html_tag.get("lang", "")
+                if lang:
+                    distinct_locales.add(lang[:2].lower())
+
+            # 2. Scan internal links for locale-style path segments
+            for a_tag in pr.soup.find_all("a", href=True):
+                href = a_tag["href"]
+                match = _LOCALE_PATH_RE.search(href)
+                if match:
+                    locale = match.group(1).lower()
+                    distinct_locales.add(locale)
+
+            # Check for existing hreflang alternate tags
+            if pr.soup.find("link", attrs={"rel": "alternate", "hreflang": True}):
+                has_hreflang = True
+
+        # 3. Emit finding only when multilingual signals exist AND
+        #    zero hreflang tags found across all pages
+        if len(distinct_locales) > 1 and not has_hreflang:
+            sorted_locales = sorted(distinct_locales)
+            findings.append(_finding(
+                "CR-010",
+                "Multilingual content without hreflang tags",
+                "medium",
+                f"Detected {len(distinct_locales)} locale signals "
+                f"({', '.join(sorted_locales)}) but zero hreflang "
+                f"alternate tags across {len(page_results)} pages checked.",
+                "Add <link rel='alternate' hreflang='xx'> tags for each "
+                "language/region variant so AI engines serve the correct "
+                "localized version.",
+            ))
+    except Exception as exc:
+        logger.debug("CR-010 error: %s", exc)
+    return findings
+
+
 # ===================================================================
 # Proactive recommendations
 # ===================================================================
@@ -780,22 +837,7 @@ def _proactive(
                 "priority": "medium",
             })
 
-        # Suggest hreflang for multi-language if multiple languages detected
-        lang_tags: set[str] = set()
-        for pr in page_results.values():
-            if pr.soup:
-                html_tag = pr.soup.find("html")
-                if html_tag:
-                    lang = html_tag.get("lang", "")
-                    if lang:
-                        lang_tags.add(lang[:2].lower())
-        if len(lang_tags) > 1:
-            recs.append({
-                "title": "Implement hreflang tags for multilingual content",
-                "rationale": "hreflang signals help AI engines serve the correct "
-                             "language variant in responses and citations.",
-                "priority": "medium",
-            })
+
 
     except Exception as exc:
         logger.debug("Proactive recs error: %s", exc)
@@ -806,7 +848,7 @@ def _proactive(
 # MAIN ENTRY POINT
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
-    """Execute Crawl & Render Access checks CR-001 -> CR-009.
+    """Execute Crawl & Render Access checks CR-001 -> CR-010.
 
     Returns the standard domain payload **plus** ``crawl_frontier`` and
     ``page_results`` for downstream skills.
@@ -822,6 +864,21 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     # Check whether sitemap was declared in robots.txt
     sm_from_robots = bool(http_client.robots.get_sitemaps(target_url))
 
+    # Parse sitemap to get total URL count BEFORE max_pages truncation
+    sitemap_total: int | None = None
+    if sitemap_xml:
+        sitemap_total = len(_parse_sitemap_xml(sitemap_xml))
+
+    budget_limited = (
+        sitemap_total is not None
+        and sitemap_total > max_pages
+    )
+    coverage = {
+        "pages_audited": len(frontier),
+        "pages_in_sitemap": sitemap_total,
+        "budget_limited": budget_limited,
+    }
+
     # 2. Run all checks
     findings: list[dict] = []
     findings.extend(_check_cr001(target_url, http_client))
@@ -831,6 +888,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots))
     findings.extend(_check_cr008(page_results))
     findings.extend(_check_cr009(frontier, http_client))
+    findings.extend(_check_cr010(page_results))
 
     # 3. Proactive recommendations
     proactive = _proactive(page_results, target_url)
@@ -845,6 +903,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
         "errors": errors,
         "findings": findings,
         "proactive_candidates": proactive,
+        "coverage": coverage,
         # Extra: shared with peer skills
         "crawl_frontier": [
             FrontierEntry(

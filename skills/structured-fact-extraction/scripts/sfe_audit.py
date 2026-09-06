@@ -1,7 +1,7 @@
 """
 sfe_audit.py
 ============
-Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-008)
+Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-010)
 
 Validates Schema.org JSON-LD markup, detects facts trapped in images/canvas/PDFs,
 and inspects document freshness metadata across the crawl frontier.
@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import string
 import sys
 from collections import Counter
+from itertools import combinations
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -700,6 +702,131 @@ def _check_sf007_sf008(
     return findings
 
 
+# Punctuation translation table (strip all punctuation)
+_PUNCT_TABLE = str.maketrans("", "", string.punctuation)
+
+
+def _check_sf009(page_results: dict[str, PageResult]) -> list[dict]:
+    """SF-009 (medium): Near-duplicate content across pages."""
+    findings: list[dict] = []
+
+    # Cap O(n^2) comparison to stay within the 5-minute runtime budget
+    if len(page_results) > 30:
+        return findings
+
+    try:
+        # 1. Build content fingerprints per page
+        page_shingles: dict[str, set[int]] = {}
+
+        for url, pr in page_results.items():
+            if not pr.soup:
+                continue
+
+            # Extract visible text (same pattern as http_client extract_text_ratio)
+            from bs4 import BeautifulSoup
+            working = BeautifulSoup(str(pr.soup), "html.parser")
+            for tag in working.find_all(["script", "style", "noscript", "meta", "link"]):
+                tag.decompose()
+            text = working.get_text(separator=" ", strip=True)
+
+            # Normalize: lowercase, strip punctuation, collapse whitespace
+            text = text.lower().translate(_PUNCT_TABLE)
+            text = re.sub(r"\s+", " ", text).strip()
+
+            # 2. Compute 5-word shingles
+            words = text.split()
+            if len(words) < 5:
+                continue
+            shingles: set[int] = set()
+            for i in range(len(words) - 4):
+                shingle = " ".join(words[i:i + 5])
+                shingles.add(hash(shingle) % (2 ** 32))
+
+            # Skip pages with fewer than 20 shingles (too short)
+            if len(shingles) < 20:
+                continue
+
+            page_shingles[url] = shingles
+
+        # 3. Pairwise Jaccard similarity
+        duplicate_pairs: list[tuple[str, str]] = []
+        for url_a, url_b in combinations(page_shingles.keys(), 2):
+            set_a = page_shingles[url_a]
+            set_b = page_shingles[url_b]
+            union_size = len(set_a | set_b)
+            if union_size == 0:
+                continue
+            jaccard = len(set_a & set_b) / union_size
+            if jaccard > 0.85:
+                duplicate_pairs.append((url_a, url_b))
+
+        # 4. Emit finding if duplicates found
+        if duplicate_pairs:
+            findings.append(_finding(
+                "SF-009",
+                "Near-duplicate content across pages",
+                "medium",
+                f"{len(duplicate_pairs)} page pair(s) share >85% content "
+                f"similarity: "
+                + "; ".join(
+                    f"{a} ~ {b}" for a, b in duplicate_pairs[:5]
+                ),
+                "Differentiate or canonicalize near-duplicate pages \u2014 AI "
+                "systems deduplicate similar pages before citing, so "
+                "duplicates compete with each other for the same citation "
+                "slot instead of both being cited.",
+            ))
+    except Exception as exc:
+        logger.debug("SF-009 error: %s", exc)
+    return findings
+
+
+def _check_sf010(page_results: dict[str, PageResult]) -> list[dict]:
+    """SF-010 (low): Pages missing Open Graph / Twitter Card metadata."""
+    findings: list[dict] = []
+    try:
+        total = 0
+        missing_both_count = 0
+
+        for url, pr in page_results.items():
+            if not pr.soup:
+                continue
+            total += 1
+
+            has_og_title = bool(
+                pr.soup.find("meta", attrs={"property": "og:title"})
+            )
+            has_og_desc = bool(
+                pr.soup.find("meta", attrs={"property": "og:description"})
+            )
+            # Also track og:image and twitter:card for completeness
+            # (not part of the threshold, but useful context)
+            # has_og_image = bool(
+            #     pr.soup.find("meta", attrs={"property": "og:image"})
+            # )
+            # has_twitter = bool(
+            #     pr.soup.find("meta", attrs={"name": "twitter:card"})
+            # )
+
+            if not has_og_title and not has_og_desc:
+                missing_both_count += 1
+
+        if total > 0 and missing_both_count > total / 2:
+            findings.append(_finding(
+                "SF-010",
+                "Pages missing Open Graph / Twitter Card metadata",
+                "low",
+                f"{missing_both_count} of {total} pages checked lack "
+                f"og:title/og:description meta tags.",
+                "Add Open Graph and Twitter Card meta tags to every page. "
+                "Some AI assistants (e.g. web-browsing modes) use these as "
+                "a fallback snippet source when JSON-LD is absent or thin.",
+            ))
+    except Exception as exc:
+        logger.debug("SF-010 error: %s", exc)
+    return findings
+
+
 # ---------------------------------------------------------------------------
 # Date parsing helpers
 # ---------------------------------------------------------------------------
@@ -798,7 +925,7 @@ def _proactive(frontier: list[str], page_results: dict[str, PageResult]) -> list
 # MAIN ENTRY POINT
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
-    """Execute Structured Fact Extraction checks SF-001 -> SF-008."""
+    """Execute Structured Fact Extraction checks SF-001 -> SF-010."""
     import urllib.parse  # ensure available for is_homepage
 
     frontier: list[str] = kwargs.get("crawl_frontier", [target_url])
@@ -825,6 +952,8 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_sf005(frontier, page_results, http_client))
     findings.extend(_check_sf006(frontier, page_results))
     findings.extend(_check_sf007_sf008(frontier, page_results))
+    findings.extend(_check_sf009(page_results))
+    findings.extend(_check_sf010(page_results))
 
     proactive = _proactive(frontier, page_results)
 

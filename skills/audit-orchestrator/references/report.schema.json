@@ -79,6 +79,27 @@
           "type": "string",
           "description": "Letter grade derived from overall_score.",
           "enum": ["A", "B", "C", "D", "F"]
+        },
+        "coverage": {
+          "type": "object",
+          "description": "Crawl budget coverage metadata indicating whether the audit was limited by max_pages.",
+          "required": ["pages_audited", "pages_in_sitemap", "budget_limited"],
+          "additionalProperties": false,
+          "properties": {
+            "pages_audited": {
+              "type": "integer",
+              "description": "Number of pages actually audited (after max_pages truncation).",
+              "minimum": 0
+            },
+            "pages_in_sitemap": {
+              "type": ["integer", "null"],
+              "description": "Total number of URLs found in the sitemap before truncation, or null if no sitemap exists."
+            },
+            "budget_limited": {
+              "type": "boolean",
+              "description": "True if the sitemap contained more URLs than max_pages allowed."
+            }
+          }
         }
       }
     },

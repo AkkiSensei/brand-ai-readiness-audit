@@ -4,7 +4,8 @@ version: 1.0.0
 description: >
   Domain sub-skill that audits a brand website for AI-crawler accessibility,
   covering robots.txt AI bot policies, SSR vs CSR text blanking ratios, HTTP
-  status codes across internal links, and XML sitemap completeness and freshness.
+  status codes across internal links, XML sitemap completeness and freshness,
+  and multilingual hreflang tag detection.
 entrypoint: false
 tags:
   - crawlability
@@ -71,6 +72,7 @@ a `SkillCoverage` dict.
 | `excessive-redirect-chain`        | low      | Redirect chain length > 2                        |
 | `http-not-redirected-to-https`    | high     | http:// root does not redirect to https://       |
 | `ua-cloaking-discrepancy`         | high     | Discrepancy between browser and AI-crawler content >= threshold (CR-009) |
+| `multilingual-no-hreflang`        | medium   | >1 locale signals detected but zero hreflang tags (CR-010) |
 
 ## References
 

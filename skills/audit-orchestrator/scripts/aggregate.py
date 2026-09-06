@@ -660,6 +660,17 @@ def _run_pipeline(
         "grade": grade,
     }
 
+    # Propagate crawl coverage into summary
+    crawl_cov = (domain_results.get("crawl-render-access") or {}).get("coverage")
+    if crawl_cov is not None:
+        summary["coverage"] = crawl_cov
+    else:
+        summary["coverage"] = {
+            "pages_audited": 0,
+            "pages_in_sitemap": None,
+            "budget_limited": False,
+        }
+
     # ==============================================================
     # STEP 13: Coverage
     # ==============================================================
