@@ -355,6 +355,7 @@ def _check_cr002(
                 long_redirects.append(
                     f"{url} ({len(pr.redirect_chain)} hops)" if pr.redirect_chain else f"{url} (redirect loop)"
                 )
+        total_pages = len(page_results)
         if bad_codes:
             findings.append(_finding(
                 "CR-002",
@@ -366,6 +367,8 @@ def _check_cr002(
                 "Fix server responses so all public pages return 200 (OK) or "
                 "use 301 for permanent redirects. Remove or correct links to "
                 "pages returning 4xx/5xx errors.",
+                pages_affected=len(bad_codes),
+                pages_checked=total_pages,
             ))
         if long_redirects:
             findings.append(_finding(
@@ -377,6 +380,8 @@ def _check_cr002(
                 "Shorten redirect chains to at most 1-2 hops to avoid crawler "
                 "timeouts and wasted crawl budget.",
                 related=["CR-008"],
+                pages_affected=len(long_redirects),
+                pages_checked=total_pages,
             ))
     except Exception as exc:
         logger.debug("CR-002 error: %s", exc)

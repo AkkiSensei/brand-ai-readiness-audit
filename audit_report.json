@@ -1,0 +1,181 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-09-08T17:52:22Z",
+  "target_url": "https://www.boat-lifestyle.com/",
+  "pages_audited": 5,
+  "audit_duration_seconds": 50.52,
+  "summary": {
+    "total_findings": 9,
+    "critical": 0,
+    "high": 1,
+    "medium": 3,
+    "low": 2,
+    "info": 3,
+    "overall_score": 87.9,
+    "grade": "A",
+    "coverage": {
+      "pages_audited": 5,
+      "pages_in_sitemap": 17,
+      "budget_limited": true
+    }
+  },
+  "findings": [
+    {
+      "local_id": "SF-002",
+      "id": "F-001",
+      "title": "Invalid JSON-LD syntax detected",
+      "severity": "high",
+      "category": "discoverability",
+      "evidence": "2 page(s) have JSON-LD blocks that fail JSON parsing: https://www.boat-lifestyle.com/products/nirvana-uno; https://www.boat-lifestyle.com/products/stone-grenade",
+      "suggested_action": {
+        "summary": "Fix JSON syntax errors in application/ld+json script blocks. Validate with Google Rich Results Test.",
+        "priority": "high"
+      },
+      "related_to": []
+    },
+    {
+      "local_id": "TC-002",
+      "id": "F-002",
+      "title": "Inconsistent address information across pages",
+      "severity": "medium",
+      "category": "discoverability",
+      "evidence": "3/3 address comparisons below similarity threshold (0.85).",
+      "suggested_action": {
+        "summary": "Standardise address formatting across all pages and JSON-LD. Use PostalAddress structured data with consistent field values.",
+        "priority": "medium"
+      },
+      "related_to": []
+    },
+    {
+      "local_id": "TC-006",
+      "id": "F-003",
+      "title": "Organization schema missing disambiguation properties",
+      "severity": "medium",
+      "category": "discoverability",
+      "evidence": "Primary Organization block is missing: foundingDate, address, knowsAbout, legalName",
+      "suggested_action": {
+        "summary": "Add foundingDate, address, legalName, and knowsAbout to your Organization JSON-LD to help AI engines distinguish your brand from others with similar names.",
+        "priority": "medium"
+      },
+      "related_to": []
+    },
+    {
+      "local_id": "SF-007",
+      "id": "F-004",
+      "title": "Pages with stale content metadata",
+      "severity": "medium",
+      "category": "discoverability",
+      "evidence": "3 page(s) have content dated older than 365 days: https://www.boat-lifestyle.com/products/nirvana-uno; https://www.boat-lifestyle.com/products/stone-grenade; https://www.boat-lifestyle.com/products/stone-200-bluetooth-speaker",
+      "suggested_action": {
+        "summary": "Update content freshness signals (dateModified in JSON-LD, Last-Modified header, or meta tags) when content is revised.",
+        "priority": "medium"
+      },
+      "related_to": [],
+      "confidence": 0.75
+    },
+    {
+      "local_id": "ER-001",
+      "id": "F-005",
+      "title": "Multiple H1 tags on a single page",
+      "severity": "low",
+      "category": "engagement",
+      "evidence": "1 page(s) have more than one <h1>: https://www.boat-lifestyle.com/products/nirvana-uno",
+      "suggested_action": {
+        "summary": "Use a single <h1> per page. Use <h2>-<h6> for sub-sections to maintain a clear heading hierarchy.",
+        "priority": "low"
+      },
+      "related_to": [],
+      "confidence": 0.25
+    },
+    {
+      "local_id": "ER-003",
+      "id": "F-006",
+      "title": "Newsletter subscription modal detected",
+      "severity": "low",
+      "category": "engagement",
+      "evidence": "4 page(s) have newsletter/subscribe modal elements: https://www.boat-lifestyle.com/; https://www.boat-lifestyle.com/products/nirvana-uno; https://www.boat-lifestyle.com/products/stone-grenade; https://www.boat-lifestyle.com/products/stone-200-bluetooth-speaker",
+      "suggested_action": {
+        "summary": "Delay newsletter modals until after meaningful user interaction. Avoid showing them to crawler user-agents.",
+        "priority": "low"
+      },
+      "related_to": []
+    },
+    {
+      "local_id": "PA-005",
+      "id": "F-007",
+      "title": "No RSS or Atom feed detected",
+      "severity": "info",
+      "category": "proactive",
+      "evidence": "No <link rel='alternate'> with type application/rss+xml or application/atom+xml was found across any crawled page.",
+      "suggested_action": {
+        "summary": "Publish an RSS or Atom feed for your blog, news, or product updates. Syndication feeds enable AI aggregators and citation engines to track your content freshness automatically.",
+        "priority": "info"
+      },
+      "related_to": []
+    },
+    {
+      "local_id": "PA-006",
+      "id": "F-008",
+      "title": "No explicit Allow directive for AI crawlers in robots.txt",
+      "severity": "info",
+      "category": "proactive",
+      "evidence": "robots.txt does not contain any explicit Allow: directive under an AI-crawler User-agent section (e.g. GPTBot, Google-Extended). While absence of Disallow may suffice, explicit Allow signals welcoming intent.",
+      "suggested_action": {
+        "summary": "Add explicit User-agent/Allow blocks for key AI crawlers (GPTBot, Google-Extended, anthropic-ai) in robots.txt to signal that your content is open for AI indexing.",
+        "priority": "info"
+      },
+      "related_to": []
+    },
+    {
+      "local_id": "PA-003",
+      "id": "F-009",
+      "title": "Section headings lack fragment IDs for deep linking",
+      "severity": "info",
+      "category": "proactive",
+      "evidence": "Only 0/35 section headings (0%) across 4 page(s) have id attributes.",
+      "suggested_action": {
+        "summary": "Add stable id attributes to <h2> and <h3> headings to enable deep linking and AI-engine citation of specific sections. Use descriptive slugs (e.g. id='pricing-details').",
+        "priority": "info"
+      },
+      "related_to": []
+    }
+  ],
+  "proactive_recommendations": [
+    "Create or link to a Wikidata entity: Wikidata is the primary knowledge base for many AI systems. A verified Wikidata entry with sameAs linking significantly improves entity recognition.",
+    "Add contactPoint to Organization schema: ContactPoint structured data helps AI engines surface your customer service details in responses.",
+    "Maintain and expand agent documentation manifest: Detected accessible AI manifest at https://www.boat-lifestyle.com/agents.md. Providing structured documentation for LLM agents significantly improves brand representation in AI search.",
+    "Add aria-label to navigation elements: 4/7 <nav> elements lack aria-label. Labelling navigation regions improves accessibility and helps AI engines understand page structure."
+  ],
+  "coverage": {
+    "crawl_render_access": {
+      "pages_checked": 5,
+      "checks_run": 0,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "structured_fact_extraction": {
+      "pages_checked": 5,
+      "checks_run": 2,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "trust_entity_corroboration": {
+      "pages_checked": 5,
+      "checks_run": 2,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "engagement_retention": {
+      "pages_checked": 5,
+      "checks_run": 2,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "pages_with_low_render_confidence": 0,
+    "render_confidence": "high"
+  }
+}

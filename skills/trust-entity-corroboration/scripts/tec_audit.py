@@ -245,7 +245,7 @@ def _check_tc001(
 
             # Check if domain is authoritative
             domain = parsed.hostname.lower()
-            is_auth = any(domain.endswith(ad) for ad in _AUTHORITATIVE_DOMAINS)
+            is_auth = any(domain == ad or domain.endswith("." + ad) for ad in _AUTHORITATIVE_DOMAINS)
             if not is_auth:
                 non_authoritative.append(sa_url)
 
@@ -253,10 +253,13 @@ def _check_tc001(
             if len(unresolvable) + len(invalid_urls) < 3:
                 try:
                     head_result = http_client.head(sa_url)
-                    if head_result.status_code and head_result.status_code >= 400:
-                        unresolvable.append(
-                            f"{sa_url} (HTTP {head_result.status_code})"
-                        )
+                    if head_result.status_code is not None:
+                        if head_result.status_code >= 400:
+                            unresolvable.append(
+                                f"{sa_url} (HTTP {head_result.status_code})"
+                            )
+                    elif head_result.error:
+                        unresolvable.append(f"{sa_url} ({head_result.error[:60]})")
                 except Exception:
                     unresolvable.append(f"{sa_url} (request failed)")
 

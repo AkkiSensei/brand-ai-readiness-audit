@@ -35,10 +35,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+import warnings
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +194,23 @@ class PageResult:
 
     render_confidence: str = "high"
     """Render confidence for this page: 'high' or 'low'."""
+
+    @property
+    def is_html(self) -> bool:
+        """True if the response represents an HTML document."""
+        if self.content_type:
+            ct = self.content_type.lower()
+            return "text/html" in ct or "application/xhtml+xml" in ct
+        # Fallback based on URL extension when Content-Type header is absent
+        parsed = urllib.parse.urlparse(self.url or "")
+        path = parsed.path.lower()
+        non_html_exts = (
+            ".md", ".markdown", ".txt", ".xml", ".json", ".pdf",
+            ".csv", ".tsv", ".yaml", ".yml", ".rss", ".atom",
+            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+            ".mp4", ".mp3", ".zip", ".gz"
+        )
+        return not any(path.endswith(ext) for ext in non_html_exts)
 
 
 class FrontierEntry(str):
@@ -525,6 +545,8 @@ class HttpClient:
             result.status_code = resp.status_code
             result.url = current_url
             result.redirect_chain = redirect_chain
+            if resp.is_redirect:
+                result.error = f"Too many redirects ({len(redirect_chain)} hops) fetching {url}"
             result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
             content_type_full = resp.headers.get("Content-Type", "")
             result.content_type = content_type_full.split(";")[0].strip().lower()
@@ -578,13 +600,8 @@ class HttpClient:
                 except Exception:
                     result.html = raw_bytes.decode("latin-1", errors="replace")
 
-            # Parse HTML
-            if result.content_type in (
-                "text/html",
-                "application/xhtml+xml",
-                "text/xml",
-                "application/xml",
-            ) or result.content_type.startswith("text/"):
+            # Parse HTML with BeautifulSoup only for HTML content
+            if result.is_html and result.html:
                 result.soup = self._parse_html(result.html)
 
         except requests.exceptions.Timeout as exc:
@@ -656,6 +673,8 @@ class HttpClient:
                 result.status_code = resp.status_code
                 result.url = current_url
                 result.redirect_chain = redirect_chain
+                if resp.is_redirect:
+                    result.error = f"Too many redirects ({len(redirect_chain)} hops) for {url}"
                 result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
                 content_type_full = resp.headers.get("Content-Type", "")
                 result.content_type = content_type_full.split(";")[0].strip().lower()

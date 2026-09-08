@@ -24,10 +24,17 @@ import re
 import sys
 import time
 import urllib.parse
+import warnings
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+
+try:
+    from bs4 import XMLParsedAsHTMLWarning
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+except ImportError:
+    pass
 
 # ---------------------------------------------------------------------------
 # Path bootstrap
@@ -174,7 +181,8 @@ def _normalise_finding(raw: dict, domain_name: str, target_url: str) -> dict:
         and pages_checked is not None
         and pages_checked > 0
     ):
-        finding["confidence"] = round(pages_affected / pages_checked, 2)
+        conf = round(pages_affected / pages_checked, 2)
+        finding["confidence"] = max(0.0, min(1.0, conf))
 
     return finding
 
@@ -298,13 +306,23 @@ def _compute_score(findings: list[dict]) -> float:
         domain = f.get("_domain", "")
         key = domain_to_key.get(domain)
         if not key:
-            cat = f.get("category", "")
-            if cat in domain_penalties:
-                key = cat
-            elif cat == "engagement":
-                key = "engagement_retention"
-            elif cat == "discoverability":
+            lid = f.get("local_id", "") or f.get("_local_id", "")
+            if lid.startswith("CR-"):
                 key = "crawl_render_access"
+            elif lid.startswith("SF-"):
+                key = "structured_fact_extraction"
+            elif lid.startswith("TC-"):
+                key = "trust_entity_corroboration"
+            elif lid.startswith("ER-"):
+                key = "engagement_retention"
+            else:
+                cat = f.get("category", "")
+                if cat in domain_penalties:
+                    key = cat
+                elif cat == "engagement":
+                    key = "engagement_retention"
+                elif cat == "discoverability":
+                    key = "crawl_render_access"
         severity = f.get("severity", "info")
         penalty = _SEVERITY_PENALTY.get(severity, 0)
         if key and key in domain_penalties:
@@ -644,14 +662,14 @@ def _run_pipeline(
     # Re-resolve references
     sorted_findings = _resolve_related_to(sorted_findings)
 
-    # Clean internal fields
-    sorted_findings = _clean_internal_fields(sorted_findings)
-
     # ==============================================================
     # STEP 11: Scoring + grading
     # ==============================================================
     score = _compute_score(sorted_findings)
     grade = _compute_grade(score)
+
+    # Clean internal fields after scoring
+    sorted_findings = _clean_internal_fields(sorted_findings)
 
     # ==============================================================
     # STEP 12: Summary

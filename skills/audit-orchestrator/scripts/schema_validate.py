@@ -134,6 +134,20 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
             grade = summary["grade"]
             if grade not in _VALID_GRADES:
                 errors.append(f"summary.grade must be one of {_VALID_GRADES}, got '{grade}'")
+        if "coverage" in summary:
+            scov = summary["coverage"]
+            if not isinstance(scov, dict):
+                errors.append("summary.coverage must be an object/dict")
+            else:
+                for k in ("pages_audited", "pages_in_sitemap", "budget_limited"):
+                    if k not in scov:
+                        errors.append(f"summary.coverage missing required key '{k}'")
+                if "pages_audited" in scov and not isinstance(scov["pages_audited"], int):
+                    errors.append("summary.coverage.pages_audited must be an integer")
+                if "pages_in_sitemap" in scov and scov["pages_in_sitemap"] is not None and not isinstance(scov["pages_in_sitemap"], int):
+                    errors.append("summary.coverage.pages_in_sitemap must be an integer or null")
+                if "budget_limited" in scov and not isinstance(scov["budget_limited"], bool):
+                    errors.append("summary.coverage.budget_limited must be a boolean")
     elif summary is not None:
         errors.append("summary must be an object/dict")
 
@@ -257,6 +271,14 @@ def _validate_finding(finding: Any, index: int, errors: list[str]) -> None:
             errors.append(f"{prefix}.related_to must be an array/list")
         elif not all(isinstance(x, str) for x in rt):
             errors.append(f"{prefix}.related_to items must be strings")
+
+    # confidence (optional number between 0.0 and 1.0)
+    if "confidence" in finding:
+        conf = finding["confidence"]
+        if not isinstance(conf, (int, float)):
+            errors.append(f"{prefix}.confidence must be a number")
+        elif conf < 0.0 or conf > 1.0:
+            errors.append(f"{prefix}.confidence must be between 0.0 and 1.0, got {conf}")
 
 
 def _validate_skill_coverage(cov: Any, domain: str, errors: list[str]) -> None:

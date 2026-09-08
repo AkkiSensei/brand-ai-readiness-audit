@@ -4,7 +4,7 @@ tests/test_archetypes.py
 Step 4 — Archetype Matrix Validation test suite.
 
 Spawns a local HTTP server on 127.0.0.1 on an ephemeral port to serve
-the 5 site archetype fixtures, and executes the real Audit Orchestrator
+the 9 site archetype fixtures, and executes the real Audit Orchestrator
 against each archetype.
 
 Validates:
@@ -13,9 +13,13 @@ Validates:
   3. Legacy (3_legacy.html): (ER-006 OR ER-007) AND (TC-001 OR TC-006) detected.
   4. Blog (4_blog.html): SF-006 detected (positive), SF-007 absent (negative).
   5. Paywall (5_paywall.html): ER-003 OR CR-005 detected.
-  6. Schema validation (report.schema.json via validate_report).
-  7. Sequential finding IDs (F-001..F-NNN) and related_to integrity.
-  8. Score (0-100) and grade validity.
+  6. Hydration / Partial-SSR (6_hydration.html): CR-004 detected, CR-003 absent.
+  7. Benign Cookie Banner (7_cookie_banner.html): ER-003/CR-005 absent.
+  8. i18n / Multilingual (8_i18n.html): TC-004 absent.
+  9. Non-HTML Document (agents.md): HTML structural rules ER-001..ER-007 absent.
+  10. Schema validation (report.schema.json via validate_report).
+  11. Sequential finding IDs (F-001..F-NNN) and related_to integrity.
+  12. Score (0-100) and grade validity.
 """
 
 from __future__ import annotations
@@ -41,7 +45,6 @@ for p in (_ORCH_DIR, _HTTP_DIR, _REPO_ROOT):
         sys.path.insert(0, str(p))
 
 from aggregate import run_audit
-from http_client import HttpClient
 from schema_validate import validate_report
 import warnings
 from bs4 import XMLParsedAsHTMLWarning
@@ -92,12 +95,30 @@ class ArchetypeRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(xml)
             return
 
+        if self.path == "/agents.md" or self.path.endswith(".md"):
+            content = (
+                "# AI Agent Discovery Manifest\n\n"
+                "This file is served as text/markdown for autonomous AI web crawlers.\n"
+                "- Sitemap: /sitemap.xml\n"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+            return
+
         # Serve static assets or fixtures
         super().do_GET()
 
     def do_HEAD(self) -> None:
         if self.path in ("/llms.txt", "/llms-full.txt"):
             self.send_response(404)
+            self.end_headers()
+            return
+        if self.path == "/agents.md" or self.path.endswith(".md"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/markdown; charset=utf-8")
             self.end_headers()
             return
         super().do_HEAD()
@@ -176,19 +197,18 @@ def run_archetype_matrix() -> int:
     print(f"  Port: {port}")
 
     passed_count = 0
-    total_count = 8
+    total_count = 9
     schema_all_passed = True
     false_positive_regressions = 0
 
     try:
         # -------------------------------------------------------------
-        # [1/5] SPA
+        # [1/8] SPA
         # -------------------------------------------------------------
         spa_file = "1_spa.html"
         ArchetypeRequestHandler.active_fixture = spa_file
         spa_url = f"http://127.0.0.1:{port}/{spa_file}"
         t0 = time.time()
-        client = HttpClient()
         report_spa = run_audit(spa_url, max_pages=3)
         spa_duration = round(time.time() - t0, 2)
 
@@ -201,7 +221,7 @@ def run_archetype_matrix() -> int:
         if spa_pass:
             passed_count += 1
 
-        print(f"\n[1/5] SPA")
+        print(f"\n[1/8] SPA")
         print(f"  Fixture: {spa_file}")
         print(f"  URL: {spa_url}")
         print(f"  Duration: {spa_duration}s")
@@ -211,13 +231,12 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if spa_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [2/5] E-commerce
+        # [2/8] E-commerce
         # -------------------------------------------------------------
         ecom_file = "2_ecommerce.html"
         ArchetypeRequestHandler.active_fixture = ecom_file
         ecom_url = f"http://127.0.0.1:{port}/{ecom_file}"
         t0 = time.time()
-        client = HttpClient()
         report_ecom = run_audit(ecom_url, max_pages=3)
         ecom_duration = round(time.time() - t0, 2)
 
@@ -233,7 +252,7 @@ def run_archetype_matrix() -> int:
         if ecom_pass:
             passed_count += 1
 
-        print(f"\n[2/5] E-commerce")
+        print(f"\n[2/8] E-commerce")
         print(f"  Fixture: {ecom_file}")
         print(f"  URL: {ecom_url}")
         print(f"  Duration: {ecom_duration}s")
@@ -246,13 +265,12 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if ecom_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [3/5] Legacy
+        # [3/8] Legacy
         # -------------------------------------------------------------
         legacy_file = "3_legacy.html"
         ArchetypeRequestHandler.active_fixture = legacy_file
         legacy_url = f"http://127.0.0.1:{port}/{legacy_file}"
         t0 = time.time()
-        client = HttpClient()
         report_legacy = run_audit(legacy_url, max_pages=3)
         legacy_duration = round(time.time() - t0, 2)
 
@@ -268,7 +286,7 @@ def run_archetype_matrix() -> int:
         if legacy_pass:
             passed_count += 1
 
-        print(f"\n[3/5] Legacy")
+        print(f"\n[3/8] Legacy")
         print(f"  Fixture: {legacy_file}")
         print(f"  URL: {legacy_url}")
         print(f"  Duration: {legacy_duration}s")
@@ -281,13 +299,12 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if legacy_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [4/5] Blog
+        # [4/8] Blog
         # -------------------------------------------------------------
         blog_file = "4_blog.html"
         ArchetypeRequestHandler.active_fixture = blog_file
         blog_url = f"http://127.0.0.1:{port}/{blog_file}"
         t0 = time.time()
-        client = HttpClient()
         report_blog = run_audit(blog_url, max_pages=3)
         blog_duration = round(time.time() - t0, 2)
 
@@ -305,7 +322,7 @@ def run_archetype_matrix() -> int:
         if blog_pass:
             passed_count += 1
 
-        print(f"\n[4/5] Blog")
+        print(f"\n[4/8] Blog")
         print(f"  Fixture: {blog_file}")
         print(f"  URL: {blog_url}")
         print(f"  Duration: {blog_duration}s")
@@ -322,7 +339,6 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = paywall_file
         paywall_url = f"http://127.0.0.1:{port}/{paywall_file}"
         t0 = time.time()
-        client = HttpClient()
         report_paywall = run_audit(paywall_url, max_pages=3)
         paywall_duration = round(time.time() - t0, 2)
 
@@ -355,7 +371,6 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = hydration_file
         hydration_url = f"http://127.0.0.1:{port}/{hydration_file}"
         t0 = time.time()
-        client = HttpClient(allow_private_ips=True)
         report_hydration = run_audit(hydration_url, max_pages=3)
         hydration_duration = round(time.time() - t0, 2)
 
@@ -389,7 +404,6 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = cookie_file
         cookie_url = f"http://127.0.0.1:{port}/{cookie_file}"
         t0 = time.time()
-        client = HttpClient(allow_private_ips=True)
         report_cookie = run_audit(cookie_url, max_pages=3)
         cookie_duration = round(time.time() - t0, 2)
 
@@ -422,7 +436,6 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = i18n_file
         i18n_url = f"http://127.0.0.1:{port}/{i18n_file}"
         t0 = time.time()
-        client = HttpClient(allow_private_ips=True)
         report_i18n = run_audit(i18n_url, max_pages=3)
         i18n_duration = round(time.time() - t0, 2)
 
@@ -447,6 +460,40 @@ def run_archetype_matrix() -> int:
         print(f"  Detected: {i18n_rules}")
         print(f"  Schema: {'PASS' if i18n_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if i18n_pass else 'FAIL'}")
+
+        # -------------------------------------------------------------
+        # [9/9] Non-HTML Document (agents.md / text/markdown)
+        # -------------------------------------------------------------
+        agents_file = "agents.md"
+        ArchetypeRequestHandler.active_fixture = agents_file
+        agents_url = f"http://127.0.0.1:{port}/{agents_file}"
+        t0 = time.time()
+        report_agents = run_audit(agents_url, max_pages=3)
+        agents_duration = round(time.time() - t0, 2)
+
+        agents_rules = [f.get("local_id") for f in report_agents.get("findings", []) if f.get("local_id")]
+        agents_schema_valid, agents_errs = _verify_report_integrity(report_agents)
+        if not agents_schema_valid:
+            schema_all_passed = False
+
+        # Structural HTML checks must NOT fire on non-HTML markdown files
+        html_structural_rules = {"ER-001", "ER-002", "ER-003", "ER-005", "ER-006", "ER-007", "SF-008"}
+        agents_fp = [r for r in agents_rules if r in html_structural_rules]
+        agents_no_fp = (len(agents_fp) == 0)
+        if not agents_no_fp:
+            false_positive_regressions += 1
+        agents_pass = agents_no_fp and agents_schema_valid
+        if agents_pass:
+            passed_count += 1
+
+        print(f"\n[9/9] Non-HTML Document (agents.md)")
+        print(f"  Fixture: {agents_file}")
+        print(f"  URL: {agents_url}")
+        print(f"  Duration: {agents_duration}s")
+        print(f"  Expected negative: ER-001, ER-002, ER-003, ER-005, ER-006, ER-007 absent")
+        print(f"  Detected: {agents_rules}")
+        print(f"  Schema: {'PASS' if agents_schema_valid else 'FAIL'}")
+        print(f"  Result: {'PASS' if agents_pass else 'FAIL'}")
 
     finally:
         httpd.shutdown()

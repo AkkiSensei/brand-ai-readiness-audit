@@ -432,6 +432,7 @@ def _pa006(
         current_agents: set[str] = set()
         ai_specific_allow = False
         ai_crawler_names_lower = {c.lower() for c in _AI_CRAWLERS}
+        in_user_agent_block = False
 
         for line in lines:
             stripped = line.strip()
@@ -439,20 +440,19 @@ def _pa006(
                 continue
 
             if stripped.lower().startswith("user-agent:"):
-                agent = stripped.split(":", 1)[1].strip().lower()
-                if not current_agents or agent:
-                    current_agents.add(agent)
-            elif stripped.lower().startswith("allow:"):
-                # Check if current agent block targets an AI crawler
-                if current_agents & ai_crawler_names_lower:
-                    ai_specific_allow = True
-                    break
-                # Reset agent tracking on next directive
-            else:
-                if stripped.lower().startswith(("disallow:", "sitemap:", "crawl-delay:")):
-                    pass
-                else:
+                if not in_user_agent_block:
                     current_agents.clear()
+                    in_user_agent_block = True
+                agent = stripped.split(":", 1)[1].strip().lower()
+                if agent:
+                    current_agents.add(agent)
+            else:
+                in_user_agent_block = False
+                if stripped.lower().startswith("allow:"):
+                    # Check if current agent block targets an AI crawler
+                    if current_agents & ai_crawler_names_lower:
+                        ai_specific_allow = True
+                        break
 
         if ai_specific_allow:
             return None

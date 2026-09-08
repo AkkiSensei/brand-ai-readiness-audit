@@ -1,7 +1,7 @@
 """
 sfe_audit.py
 ============
-Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-012)
+Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-011)
 
 Validates Schema.org JSON-LD markup, detects facts trapped in images/canvas/PDFs,
 and inspects document freshness metadata across the crawl frontier.
@@ -14,6 +14,7 @@ import logging
 import re
 import string
 import sys
+import urllib.parse
 from collections import Counter
 from itertools import combinations
 from datetime import datetime, timezone, timedelta
@@ -197,7 +198,7 @@ def _find_entities(
             if k in (
                 "author", "publisher", "about", "creator", "provider",
                 "founder", "sourceOrganization", "maintainer", "@graph",
-                "item", "hasPart", "isPartOf",
+                "item", "hasPart", "isPartOf", "offers",
             ):
                 p = f"{current_path}.{k}" if current_path else k
                 results.extend(_find_entities(v, target_types, max_depth - 1, p))
@@ -587,7 +588,11 @@ def _check_sf007_sf008(
         title_map: dict[str, list[str]] = {}
         desc_map: dict[str, list[str]] = {}
 
-        for url in frontier:
+        html_pages = [u for u in frontier if page_results.get(u) and getattr(page_results[u], 'is_html', True) and page_results[u].soup]
+        if not html_pages:
+            return findings
+
+        for url in html_pages:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
@@ -662,21 +667,21 @@ def _check_sf007_sf008(
                 "Update content freshness signals (dateModified in JSON-LD, "
                 "Last-Modified header, or meta tags) when content is revised.",
                 pages_affected=len(stale_pages),
-                pages_checked=len(frontier),
+                pages_checked=len(html_pages),
             ))
 
-        if no_freshness and len(no_freshness) > len(frontier) * 0.5:
+        if no_freshness and len(no_freshness) > len(html_pages) * 0.5:
             findings.append(_finding(
                 "SF-007",
                 "Pages missing freshness metadata",
                 "low",
-                f"{len(no_freshness)}/{len(frontier)} pages lack any date "
+                f"{len(no_freshness)}/{len(html_pages)} pages lack any date "
                 "signal (dateModified, Last-Modified, etc.).",
                 "Add datePublished and dateModified properties to JSON-LD "
                 "structured data or use <meta> property tags.",
                 related=["SF-002"],
                 pages_affected=len(no_freshness),
-                pages_checked=len(frontier),
+                pages_checked=len(html_pages),
             ))
 
         # SF-008: Duplicate titles
@@ -951,92 +956,6 @@ def _check_sf011(page_results: dict[str, PageResult]) -> list[dict]:
     return findings
 
 
-def _check_sf012(page_results: dict[str, PageResult]) -> list[dict]:
-    """SF-012 (low): Step-by-step content without HowTo schema."""
-    findings: list[dict] = []
-    try:
-        step_pages: list[str] = []
-        _STEP_RE = re.compile(r"^(step\s*\d+|[0-9]+\.\s)", re.IGNORECASE)
-        seen_prs: set[int] = set()
-
-        for url, pr in page_results.items():
-            if not pr or not pr.soup:
-                continue
-            pr_id = id(pr)
-            if pr_id in seen_prs:
-                continue
-            seen_prs.add(pr_id)
-
-            # 1. Detect step pattern
-            has_step = False
-
-            # Check <ol> with 3+ <li> items
-            for ol in pr.soup.find_all("ol"):
-                items = [li for li in ol.find_all("li") if li.get_text(strip=True)]
-                if len(items) >= 3:
-                    has_step = True
-                    break
-
-            # Check 3+ headings/paragraphs matching regex in sequence
-            if not has_step:
-                def _check_seq(tags: list[Any]) -> bool:
-                    consecutive = 0
-                    for tag in tags:
-                        text = tag.get_text(strip=True)
-                        if not text:
-                            continue
-                        if _STEP_RE.search(text):
-                            consecutive += 1
-                            if consecutive >= 3:
-                                return True
-                        else:
-                            consecutive = 0
-                    return False
-
-                if (
-                    _check_seq(pr.soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]))
-                    or _check_seq(pr.soup.find_all("p"))
-                    or _check_seq(pr.soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p"]))
-                ):
-                    has_step = True
-
-            if not has_step:
-                continue
-
-            # 2. Check whether page's JSON-LD contains a "@type": "HowTo" node
-            blocks = _extract_jsonld_blocks(pr.soup)
-            has_howto_schema = any(
-                any(t.lower() == "howto" for t in _get_types(b))
-                for b in blocks
-                if not b.get("_parse_error")
-            )
-            if has_howto_schema:
-                continue
-
-            # 3. Track page
-            step_pages.append(url)
-
-        # 4. Emit finding if any pages match
-        if step_pages:
-            count = len(step_pages)
-            findings.append(_finding(
-                "SF-012",
-                "Step-by-step content without HowTo schema",
-                "low",
-                f"{count} page(s) contain instructional/step content with no "
-                f"HowTo structured data: {', '.join(step_pages[:3])}.",
-                "Add HowTo schema to instructional content so AI assistants "
-                "can extract and cite individual steps directly, the same "
-                "way FAQPage schema helps with Q&A content.",
-                pages_affected=count,
-                pages_checked=len(seen_prs),
-            ))
-
-    except Exception as exc:
-        logger.debug("SF-012 error: %s", exc)
-    return findings
-
-
 # ---------------------------------------------------------------------------
 # Date parsing helpers
 # ---------------------------------------------------------------------------
@@ -1135,9 +1054,7 @@ def _proactive(frontier: list[str], page_results: dict[str, PageResult]) -> list
 # MAIN ENTRY POINT
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
-    """Execute Structured Fact Extraction checks SF-001 -> SF-012."""
-    import urllib.parse  # ensure available for is_homepage
-
+    """Execute Structured Fact Extraction checks SF-001 -> SF-011."""
     frontier: list[str] = kwargs.get("crawl_frontier", [target_url])
     page_results: dict[str, PageResult] = kwargs.get("page_results", {})
 
@@ -1165,7 +1082,6 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_sf009(page_results))
     findings.extend(_check_sf010(page_results))
     findings.extend(_check_sf011(page_results))
-    findings.extend(_check_sf012(page_results))
 
     proactive = _proactive(frontier, page_results)
 

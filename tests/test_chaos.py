@@ -47,7 +47,6 @@ for p in (_ORCH_DIR, _HTTP_DIR, _REPO_ROOT):
         sys.path.insert(0, str(p))
 
 from aggregate import run_audit
-from http_client import HttpClient
 from schema_validate import validate_report
 
 
@@ -204,7 +203,6 @@ def run_chaos_suite() -> int:
         zb_valid = False
         zb_score = -1.0
         try:
-            client = HttpClient()
             report_zb = run_audit(zb_url, max_pages=2)
             zb_valid, zb_errs = _verify_report_integrity(report_zb)
             zb_score = report_zb.get("summary", {}).get("overall_score", -1.0)
@@ -234,7 +232,6 @@ def run_chaos_suite() -> int:
         gb_valid = False
         gb_score = -1.0
         try:
-            client = HttpClient()
             report_gb = run_audit(gb_url, max_pages=2)
             gb_valid, gb_errs = _verify_report_integrity(report_gb)
             gb_score = report_gb.get("summary", {}).get("overall_score", -1.0)
@@ -263,7 +260,6 @@ def run_chaos_suite() -> int:
         rd_valid = False
         rd_protect = False
         try:
-            client = HttpClient()
             report_rd = run_audit(rd_url, max_pages=2)
             rd_valid, rd_errs = _verify_report_integrity(report_rd)
             # Check that redirect protection engaged (CR-002 flagged or crawl error logged)

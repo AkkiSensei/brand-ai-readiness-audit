@@ -168,6 +168,24 @@ def _url_depth(url: str, root_url: str) -> int:
         return 0
 
 
+def _is_html_page(pr: Optional[PageResult]) -> bool:
+    """Return True if the PageResult represents an HTML document."""
+    if not pr:
+        return False
+    if hasattr(pr, "is_html"):
+        return pr.is_html
+    ct = (pr.content_type or "").lower()
+    if ct:
+        return "text/html" in ct or "application/xhtml+xml" in ct
+    parsed = urllib.parse.urlparse(pr.url or "")
+    path = parsed.path.lower()
+    non_html_exts = (
+        ".md", ".markdown", ".txt", ".xml", ".json", ".pdf",
+        ".csv", ".tsv", ".yaml", ".yml", ".rss", ".atom"
+    )
+    return not any(path.endswith(ext) for ext in non_html_exts)
+
+
 # ===================================================================
 # CHECK FUNCTIONS
 # ===================================================================
@@ -179,11 +197,15 @@ def _check_er001(
     """ER-001 (high): Missing H1 or primary navigation above the fold."""
     findings: list[dict] = []
     try:
+        html_pages = [u for u in frontier if _is_html_page(page_results.get(u))]
+        if not html_pages:
+            return findings
+
         missing_h1: list[str] = []
         missing_nav: list[str] = []
         multiple_h1: list[str] = []
 
-        for url in frontier:
+        for url in html_pages:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
@@ -247,7 +269,7 @@ def _check_er001(
                 "for both users and AI crawlers.",
                 related=["CR-003"],
                 pages_affected=len(missing_h1),
-                pages_checked=len(frontier),
+                pages_checked=len(html_pages),
             ))
 
         if missing_nav:
@@ -261,7 +283,7 @@ def _check_er001(
                 "Add semantic <nav> elements with at least "
                 f"{NAV_MIN_LINKS} internal links for site-wide navigation.",
                 pages_affected=len(missing_nav),
-                pages_checked=len(frontier),
+                pages_checked=len(html_pages),
             ))
 
         if multiple_h1:
@@ -274,7 +296,7 @@ def _check_er001(
                 "Use a single <h1> per page. Use <h2>-<h6> for sub-sections "
                 "to maintain a clear heading hierarchy.",
                 pages_affected=len(multiple_h1),
-                pages_checked=len(frontier),
+                pages_checked=len(html_pages),
             ))
 
     except Exception as exc:
@@ -298,7 +320,7 @@ def _check_er002(
                 continue
 
             pr = page_results.get(url)
-            if not pr or not pr.soup:
+            if not pr or not pr.soup or not _is_html_page(pr):
                 continue
 
             has_breadcrumb = False
@@ -366,7 +388,7 @@ def _check_er003(
 
         for url in frontier:
             pr = page_results.get(url)
-            if not pr or not pr.soup:
+            if not pr or not pr.soup or not _is_html_page(pr):
                 continue
 
             for elem in pr.soup.find_all(True):
@@ -497,6 +519,8 @@ def _check_er004(
             if pr:
                 if pr.status_code and pr.status_code >= 400:
                     broken.append(f"{link} (HTTP {pr.status_code})")
+                elif pr.status_code is None and pr.error:
+                    broken.append(f"{link} ({pr.error[:60]})")
                 continue
 
             # HEAD check for uncrawled links
@@ -504,6 +528,8 @@ def _check_er004(
                 head = http_client.head(link)
                 if head.status_code and head.status_code >= 400:
                     broken.append(f"{link} (HTTP {head.status_code})")
+                elif head.status_code is None and head.error:
+                    broken.append(f"{link} ({head.error[:60]})")
             except Exception:
                 broken.append(f"{link} (request failed)")
 
@@ -551,15 +577,16 @@ def _check_er005(
         pages_without_cta: list[str] = []
 
         for url in frontier:
+            pr = page_results.get(url)
+            if not pr or not pr.soup or not _is_html_page(pr):
+                continue
+
             lower = url.lower()
             is_product_like = any(
                 seg in lower
                 for seg in ("/product", "/service", "/pricing", "/plan",
                             "/demo", "/trial", "/shop", "/store", "/offer")
             )
-            pr = page_results.get(url)
-            if not pr or not pr.soup:
-                continue
 
             # Also detect via JSON-LD Product type
             if not is_product_like:
@@ -616,10 +643,14 @@ def _check_er006_er007(
     """ER-006/ER-007 (high): Responsive layout — viewport meta and mobile."""
     findings: list[dict] = []
     try:
+        html_pages = [u for u in frontier if _is_html_page(page_results.get(u))]
+        if not html_pages:
+            return findings
+
         missing_viewport: list[str] = []
         bad_viewport: list[str] = []
 
-        for url in frontier:
+        for url in html_pages:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
@@ -661,6 +692,8 @@ def _check_er006_er007(
                 'initial-scale=1"> to all pages. Without it, mobile '
                 "rendering is unpredictable and AI engines may deprioritise "
                 "the content.",
+                pages_affected=len(missing_viewport),
+                pages_checked=len(html_pages),
             ))
 
         if bad_viewport:
@@ -673,6 +706,8 @@ def _check_er006_er007(
                 "Remove user-scalable=no and maximum-scale=1 from viewport "
                 "meta. Allow users to zoom for accessibility compliance and "
                 "improved mobile experience signals.",
+                pages_affected=len(bad_viewport),
+                pages_checked=len(html_pages),
             ))
 
     except Exception as exc:
@@ -687,12 +722,13 @@ def _check_er008(
     """ER-008 (low): Search functionality for large sites."""
     findings: list[dict] = []
     try:
-        if len(frontier) < SEARCH_PAGE_THRESHOLD:
+        html_pages = [u for u in frontier if _is_html_page(page_results.get(u))]
+        if len(html_pages) < SEARCH_PAGE_THRESHOLD:
             return findings
 
         has_search = False
 
-        for url in frontier:
+        for url in html_pages:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
@@ -744,7 +780,7 @@ def _check_er008(
                 "ER-008",
                 "No site search functionality detected on large site",
                 "low",
-                f"Site has {len(frontier)} pages but no search input, "
+                f"Site has {len(html_pages)} HTML pages but no search input, "
                 "SearchAction schema, or search form was found.",
                 "Add a site search feature with SearchAction structured data "
                 "(potentialAction on WebSite schema). This enables AI engines "
@@ -765,12 +801,27 @@ def _proactive(
 ) -> list[dict]:
     recs: list[dict] = []
     try:
+        # Check for presence of AI agent manifests (agents.md, llms.txt)
+        for url in frontier:
+            lower = url.lower()
+            if any(lower.endswith(name) for name in ("/agents.md", "/llms.txt", "/llms-full.txt")):
+                pr = page_results.get(url)
+                if pr and pr.status_code and 200 <= pr.status_code < 300:
+                    recs.append({
+                        "title": "Maintain and expand agent documentation manifest",
+                        "rationale": f"Detected accessible AI manifest at {url}. "
+                                     "Providing structured documentation for LLM agents "
+                                     "significantly improves brand representation in AI search.",
+                        "priority": "low",
+                    })
+                    break
+
         # Check for aria-label on nav elements
         nav_missing_aria: int = 0
         nav_total: int = 0
         for url in frontier:
             pr = page_results.get(url)
-            if not pr or not pr.soup:
+            if not pr or not pr.soup or not _is_html_page(pr):
                 continue
             for nav in pr.soup.find_all("nav"):
                 nav_total += 1
@@ -791,7 +842,7 @@ def _proactive(
         has_skip = False
         for url in frontier[:3]:
             pr = page_results.get(url)
-            if not pr or not pr.soup:
+            if not pr or not pr.soup or not _is_html_page(pr):
                 continue
             for a in pr.soup.find_all("a", href=True):
                 text = a.get_text(strip=True).lower()
