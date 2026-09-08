@@ -50,10 +50,10 @@ across multiple authoritative sources. This skill audits three pillars:
 | `TC-002` | Inconsistent brand name across pages | high | Brand name varies across pages beyond threshold |
 | `TC-002` | Inconsistent phone numbers across pages | medium | Multiple conflicting phone numbers detected |
 | `TC-002` | Inconsistent address information across pages | medium | Address discrepancies across crawled pages |
-| `TC-003` | Third-party entity claims could not be corroborated | high | On-site entity claims (e.g. Wikipedia, Wikidata, LinkedIn) failed external verification |
+| `TC-003` | Claimed external partner or accreditation links are broken | high | Outbound verification links for claimed accreditation, certification, or partnership return broken 4xx/5xx HTTP errors |
 | `TC-004` | Brand name is ambiguous without disambiguation | critical | Common dictionary word brand without legalName or disambiguatingDescription |
 | `TC-004` | Brand name appears in too many capitalisation variants | medium | Brand name found in >2 distinct capitalization styles |
-| `TC-005` | No external entity claims could be verified | medium | None of the claimed entity links could be independently verified |
+| `TC-005` | Authority or partnership claims lack external verification links | medium | Site presents authority or partnership claims but provides zero verifiable external outbound links |
 | `TC-006` | Organization schema missing disambiguation properties | medium | Organization schema lacks `legalName`, `description`, or identifier |
 | `TC-006` | No Organization schema found for entity disambiguation | medium | Zero Organization JSON-LD found for brand disambiguation |
 

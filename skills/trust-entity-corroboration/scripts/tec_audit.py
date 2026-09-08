@@ -27,7 +27,7 @@ _SCRIPTS_DIR = (
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from http_client import HttpClient, PageResult, normalise_url
+from http_client import HttpClient, PageResult, normalise_url, is_same_origin
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,9 @@ _ENT = _T.get("entity", {})
 
 NAP_MIN_RATIO: float = float(_ENT.get("nap_consistency_min_ratio", 0.80))
 SAMEAS_MIN: int = int(_ENT.get("sameas_min_external_links", 1))
-MAX_CORROBORATION_QUERIES: int = int(_ENT.get("corroboration_max_queries", 3))
+MAX_CLAIM_VERIFICATION_URLS: int = int(
+    _ENT.get("max_claim_verification_urls", _ENT.get("corroboration_max_queries", 3))
+)
 MAX_NAME_VARIANTS: int = int(_ENT.get("brand_name_max_variations", 2))
 ADDR_SIM_THRESH: float = float(_ENT.get("address_similarity_threshold", 0.85))
 PHONE_RE_PATTERN: str = _ENT.get(
@@ -87,6 +89,32 @@ _GENERIC_WORDS = {
     "summit", "compass", "crown", "liberty", "eagle", "patriot", "horizon",
     "atlas", "genesis", "icon", "spark", "nova", "element", "core",
 }
+
+# Authority / certification / partnership claim detection heuristics
+_CLAIM_RE = re.compile(
+    r"\b(?:"
+    r"(?:certified|accredited|endorsed|approved|recognized|licensed|verified)\s+by|"
+    r"(?:official|authorized|certified|accredited|premier|gold|platinum|strategic)\s+(?:partner|reseller|distributor|member)|"
+    r"(?:partnered\s+with|in\s+partnership\s+with|partnership\s+with)|"
+    r"(?:member\s+of|membership\s+in|accredited\s+member)|"
+    r"(?:iso\s*\d+|soc[\s-]?\d+|hipaa|pci[\s-]dss|gdpr)\s+(?:certified|compliant|accredited)|"
+    r"(?:we\s+are|is|our\s+company\s+is)\s+(?:an?\s+)?(?:officially\s+)?(?:certified|accredited|endorsed|approved|recognized|licensed|verified)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Ordinary non-authority usages that should NOT trigger claim checks
+_FP_RE = re.compile(
+    r"\b(?:"
+    r"partner\s+with\s+us|become\s+a\s+partner|partner\s+portal|partner\s+login|"
+    r"partner\s+program|channel\s+partner\s+program|"
+    r"certification\s+(?:course|exam|training|program|class)|"
+    r"professional\s+certification\s+training|"
+    r"(?:get|earn)\s+(?:your\s+)?certified|"
+    r"become\s+a\s+member|member\s+(?:login|portal|area|sign\s*in)"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -410,86 +438,191 @@ def _check_tc002(
     return findings
 
 
+def _extract_authority_claims(
+    frontier: list[str],
+    page_results: dict[str, PageResult],
+) -> list[dict]:
+    """Search crawled page content for structural evidence of authority,
+    accreditation, certification, or partnership claims and their associated
+    outbound verification links.
+    """
+    claims: list[dict] = []
+    seen_snippets: set[tuple[str, str]] = set()
+
+    for url in frontier:
+        pr = page_results.get(url)
+        if not pr or not pr.soup:
+            continue
+        page_url = pr.url or url
+
+        for el in pr.soup.find_all(
+            ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "span", "a", "blockquote", "figcaption", "td"]
+        ):
+            # Skip broad container elements if they contain child paragraphs or blocks
+            if el.name in ("div", "section", "article", "main", "footer", "header", "td"):
+                if el.find(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "section", "article"]):
+                    continue
+
+            text = el.get_text(" ", strip=True)
+            if not text or len(text) > 400:
+                continue
+
+            if not _CLAIM_RE.search(text) or _FP_RE.search(text):
+                continue
+
+            # Deduplicate similar claim snippets on the same page
+            norm_key = (page_url, text[:80].lower())
+            if norm_key in seen_snippets:
+                continue
+            seen_snippets.add(norm_key)
+
+            # Extract associated anchors
+            if el.name == "a" and el.get("href"):
+                anchors = [el]
+            else:
+                anchors = el.find_all("a", href=True)
+                if not anchors and el.parent and len(el.parent.get_text(strip=True)) < 250:
+                    anchors = el.parent.find_all("a", href=True)
+
+            external_urls: list[str] = []
+            for a in anchors:
+                href = (a.get("href") or "").strip()
+                if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                    continue
+                abs_url = normalise_url(href, page_url)
+                if not abs_url:
+                    continue
+                try:
+                    parsed = urllib.parse.urlparse(abs_url)
+                    if parsed.scheme in ("http", "https") and not is_same_origin(abs_url, page_url):
+                        if abs_url not in external_urls:
+                            external_urls.append(abs_url)
+                except Exception:
+                    continue
+
+            claims.append({
+                "text": text[:120],
+                "external_links": external_urls,
+                "source_url": page_url,
+            })
+
+    return claims
+
+
+def _check_tc003(
+    frontier: list[str],
+    page_results: dict[str, PageResult],
+    http_client: HttpClient,
+) -> list[dict]:
+    """TC-003 (high): Claimed external partner or accreditation links broken.
+
+    Searches page content for structural evidence of accreditation, certification,
+    or partnership claims with outbound verification links, and checks them via HEAD
+    requests. Fires if the external verification resource returns 4xx/5xx or errors.
+    """
+    findings: list[dict] = []
+    try:
+        claims = _extract_authority_claims(frontier, page_results)
+        # Only inspect claims that provide external verification links
+        linked_claims = [c for c in claims if c["external_links"]]
+        if not linked_claims:
+            return findings
+
+        # Collect unique verification URLs
+        seen_urls: set[str] = set()
+        unique_urls: list[tuple[str, str]] = []  # (url, source_page)
+        for c in linked_claims:
+            for link in c["external_links"]:
+                if link not in seen_urls:
+                    seen_urls.add(link)
+                    unique_urls.append((link, c["source_url"]))
+
+        failed: list[str] = []
+        affected_pages: set[str] = set()
+
+        for target_url, src_page in unique_urls[:MAX_CLAIM_VERIFICATION_URLS]:
+            try:
+                head = http_client.head(target_url)
+                is_walled_garden = any(
+                    d in target_url.lower()
+                    for d in ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com")
+                )
+                if head.status_code and 200 <= head.status_code < 400:
+                    continue
+                elif is_walled_garden and (head.status_code == 999 or head.status_code in (401, 403)):
+                    # Anti-bot response confirms endpoint exists
+                    continue
+                else:
+                    code = head.status_code or "no response"
+                    failed.append(f"{target_url} (HTTP {code})")
+                    affected_pages.add(src_page)
+            except Exception as exc:
+                failed.append(f"{target_url} (error: {exc})")
+                affected_pages.add(src_page)
+
+        if failed:
+            findings.append(_finding(
+                "TC-003",
+                "Claimed external partner or accreditation links are broken",
+                "high",
+                f"{len(failed)} outbound verification link(s) for claimed "
+                f"credentials returned broken HTTP status: "
+                + "; ".join(failed[:5]),
+                "Audit and update outbound accreditation and trust verification "
+                "links to ensure all targets resolve cleanly.",
+                related=[],
+                pages_affected=len(affected_pages),
+                pages_checked=len(frontier),
+            ))
+    except Exception as exc:
+        logger.debug("TC-003 error: %s", exc)
+    return findings
+
+
+def _check_tc005(
+    frontier: list[str],
+    page_results: dict[str, PageResult],
+) -> list[dict]:
+    """TC-005 (medium): Authority or partnership claims lack external verification links.
+
+    Fires when authority, certification, or partnership claims are presented on the
+    page without any accompanying external outbound verification link.
+    """
+    findings: list[dict] = []
+    try:
+        claims = _extract_authority_claims(frontier, page_results)
+        # Find claims that have zero outbound verification links
+        unlinked = [c for c in claims if not c["external_links"]]
+        if not unlinked:
+            return findings
+
+        sample_claims = ['"' + c["text"] + '"' for c in unlinked[:3]]
+        affected_pages = len(set(c["source_url"] for c in unlinked))
+
+        findings.append(_finding(
+            "TC-005",
+            "Authority or partnership claims lack external verification links",
+            "medium",
+            f"Site presents {len(unlinked)} authority or partnership claim(s) "
+            f"without verifiable outbound links: " + "; ".join(sample_claims),
+            "Add verifiable outbound links to authoritative registries, industry "
+            "bodies, or official partner directories so AI engines can corroborate claims.",
+            related=[],
+            pages_affected=affected_pages,
+            pages_checked=len(frontier),
+        ))
+    except Exception as exc:
+        logger.debug("TC-005 error: %s", exc)
+    return findings
+
+
 def _check_tc003_tc005(
     frontier: list[str],
     page_results: dict[str, PageResult],
     http_client: HttpClient,
 ) -> list[dict]:
-    """TC-003/TC-005 (high): Rate-limited claim corroboration.
-
-    Performs up to 3 HEAD requests to verify third-party presence claims
-    (e.g., sameAs URLs) or flag stale claims.
-    """
-    findings: list[dict] = []
-    try:
-        # Collect sameAs URLs for corroboration
-        sameas_urls: list[str] = []
-        for url in frontier:
-            pr = page_results.get(url)
-            if not pr or not pr.soup:
-                continue
-            blocks = _extract_jsonld_blocks(pr.soup)
-            for block in blocks:
-                if _is_org_type(_get_types(block)):
-                    sa = block.get("sameAs", [])
-                    if isinstance(sa, str):
-                        sa = [sa]
-                    if isinstance(sa, list):
-                        sameas_urls.extend(sa)
-
-        # Deduplicate and take up to 3 for verification
-        seen: set[str] = set()
-        unique: list[str] = []
-        for u in sameas_urls:
-            if u not in seen:
-                seen.add(u)
-                unique.append(u)
-
-        verified = 0
-        failed: list[str] = []
-        for sa_url in unique[:MAX_CORROBORATION_QUERIES]:
-            try:
-                head = http_client.head(sa_url)
-                is_walled_garden = any(d in sa_url.lower() for d in ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com"))
-                if head.status_code and 200 <= head.status_code < 400:
-                    verified += 1
-                elif is_walled_garden and (head.status_code == 999 or head.status_code in (401, 403)):
-                    # Anti-bot response confirms the external profile endpoint exists
-                    verified += 1
-                else:
-                    code = head.status_code or "no response"
-                    failed.append(f"{sa_url} (HTTP {code})")
-            except Exception as exc:
-                failed.append(f"{sa_url} (error: {exc})")
-
-        if failed:
-            findings.append(_finding(
-                "TC-003",
-                "Third-party entity claims could not be corroborated",
-                "high",
-                f"{len(failed)} sameAs/external claim(s) failed verification: "
-                + "; ".join(failed),
-                "Update or remove broken external profile links. Ensure all "
-                "claimed third-party presences (Wikipedia, LinkedIn, etc.) "
-                "are active and accessible.",
-                related=["TC-001", "TC-005"],
-            ))
-
-        # TC-005: Check if any claims reference outdated profiles
-        if unique and verified == 0 and not failed:
-            findings.append(_finding(
-                "TC-005",
-                "No external entity claims could be verified",
-                "medium",
-                "None of the sameAs URLs could be verified via HEAD request.",
-                "Verify that external profile URLs are correct and publicly "
-                "accessible. Consider adding more authoritative sameAs links.",
-                related=["TC-001", "TC-003"],
-            ))
-
-    except Exception as exc:
-        logger.debug("TC-003/005 error: %s", exc)
-    return findings
+    """Dispatch to distinct TC-003 and TC-005 claim checks."""
+    return _check_tc003(frontier, page_results, http_client) + _check_tc005(frontier, page_results)
 
 
 def _check_tc004_tc006(
@@ -688,7 +821,8 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
 
     findings.extend(_check_tc001(frontier, page_results, http_client))
     findings.extend(_check_tc002(frontier, page_results))
-    findings.extend(_check_tc003_tc005(frontier, page_results, http_client))
+    findings.extend(_check_tc003(frontier, page_results, http_client))
+    findings.extend(_check_tc005(frontier, page_results))
     findings.extend(_check_tc004_tc006(frontier, page_results))
 
     proactive = _proactive(frontier, page_results)

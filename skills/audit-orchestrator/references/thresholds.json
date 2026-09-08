@@ -70,7 +70,7 @@
   "entity": {
     "nap_consistency_min_ratio": 0.80,
     "sameas_min_external_links": 1,
-    "corroboration_max_queries": 3,
+    "max_claim_verification_urls": 3,
     "brand_name_max_variations": 2,
     "address_similarity_threshold": 0.85,
     "phone_normalization_pattern": "^\\+?[0-9\\s\\-\\(\\)]{7,20}$"
