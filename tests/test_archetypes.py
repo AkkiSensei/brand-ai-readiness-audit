@@ -169,14 +169,10 @@ def _verify_report_integrity(report: dict) -> tuple[bool, list[str]]:
             if ref not in id_set:
                 errors.append(f"Invalid related_to target '{ref}' in finding {f.get('id')}")
 
-    # Score & Grade
+    # Score & Grade absence
     summary = report.get("summary", {})
-    score = summary.get("overall_score", -1)
-    grade = summary.get("grade", "")
-    if not (0.0 <= score <= 100.0):
-        errors.append(f"Score out of bounds: {score}")
-    if grade not in ("A", "B", "C", "D", "F"):
-        errors.append(f"Invalid grade: {grade}")
+    if "overall_score" in summary or "grade" in summary:
+        errors.append("summary must not contain overall_score or grade")
 
     return len(errors) == 0, errors
 

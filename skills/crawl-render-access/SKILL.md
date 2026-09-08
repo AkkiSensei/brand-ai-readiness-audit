@@ -59,20 +59,20 @@ a `SkillCoverage` dict.
 
 ## Checks & Finding IDs
 
-| Finding ID                        | Severity | Trigger Condition                                |
-|-----------------------------------|----------|--------------------------------------------------|
-| `robots-blocks-ai-crawler`        | critical | Known AI crawler blocked in robots.txt           |
-| `robots-wildcard-blocks-all`      | high     | `User-agent: *` with broad Disallow rules        |
-| `no-sitemap-declared`             | high     | No Sitemap directive in robots.txt or standard paths |
-| `sitemap-missing-lastmod`         | medium   | >30% of sitemap URLs lack `<lastmod>`            |
-| `sitemap-stale-lastmod`           | medium   | `<lastmod>` older than freshness threshold       |
-| `csr-text-blanking-severe`        | high     | Text ratio < text_blanking_ratio_threshold       |
-| `csr-text-blanking-moderate`      | medium   | Text ratio between threshold and warning value   |
-| `broken-internal-link`            | medium   | Internal URL returns 4xx or 5xx                  |
-| `excessive-redirect-chain`        | low      | Redirect chain length > 2                        |
-| `http-not-redirected-to-https`    | high     | http:// root does not redirect to https://       |
-| `ua-cloaking-discrepancy`         | high     | Discrepancy between browser and AI-crawler content >= threshold (CR-009) |
-| `multilingual-no-hreflang`        | medium   | >1 locale signals detected but zero hreflang tags (CR-010) |
+| Check ID | Finding Title | Severity | Trigger Condition |
+|----------|---------------|----------|-------------------|
+| `CR-001` | AI crawlers explicitly blocked by robots.txt | critical | Known AI crawler (GPTBot, etc.) blocked in robots.txt |
+| `CR-002` | Pages returning non-OK HTTP status codes | high | Internal page returns 4xx, 5xx, or network error |
+| `CR-002` | Excessive redirect chains detected | low | Redirect chain length > 2 hops or redirect loop |
+| `CR-003` | Severe CSR text blanking — content invisible to non-JS crawlers | critical | Raw HTML text ratio < 0.15 or empty SPA shell |
+| `CR-004` | Moderate CSR text blanking — reduced content in raw HTML | high | Text ratio between 0.15 and 0.30 |
+| `CR-005` | Paywall or login overlay detected blocking content | high | Overlay / paywall obscures main body content |
+| `CR-006` | No XML sitemap found | high | No sitemap at standard locations or in robots.txt |
+| `CR-006` | Sitemap not declared in robots.txt | medium | Sitemap exists but not referenced in robots.txt |
+| `CR-007` | Sitemap entries missing `<lastmod>` dates | medium | >30% of sitemap URLs lack `<lastmod>` |
+| `CR-007` | Sitemap contains stale `<lastmod>` dates | low | `<lastmod>` older than freshness threshold |
+| `CR-007` | Excessive Crawl-delay in robots.txt | low | Crawl-delay > 10 seconds |
+| `CR-008` | Public pages marked with noindex directive | high | Meta robots or X-Robots-Tag specifies noindex |
 
 ## References
 

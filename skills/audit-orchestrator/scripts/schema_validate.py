@@ -30,7 +30,6 @@ _VALID_CATEGORIES = {
     "trust_entity_corroboration",
     "engagement_retention",
 }
-_VALID_GRADES = {"A", "B", "C", "D", "F"}
 _DOMAIN_COVERAGE_KEYS = {
     "crawl_render_access",
     "structured_fact_extraction",
@@ -40,6 +39,45 @@ _DOMAIN_COVERAGE_KEYS = {
 _COVERAGE_KEYS = _DOMAIN_COVERAGE_KEYS | {
     "pages_with_low_render_confidence",
     "render_confidence",
+}
+
+_TOP_LEVEL_ALLOWED = {
+    "schema_version",
+    "generated_at",
+    "target_url",
+    "pages_audited",
+    "audit_duration_seconds",
+    "summary",
+    "findings",
+    "proactive_recommendations",
+    "coverage",
+}
+_SUMMARY_ALLOWED = {
+    "total_findings",
+    "critical",
+    "high",
+    "medium",
+    "low",
+    "info",
+    "coverage",
+}
+_SUMMARY_COVERAGE_ALLOWED = {
+    "pages_audited",
+    "pages_in_sitemap",
+    "budget_limited",
+}
+_FINDING_ALLOWED = {
+    "id",
+    "local_id",
+    "title",
+    "severity",
+    "category",
+    "evidence",
+    "suggested_action",
+    "related_to",
+    "references",
+    "duplicate_of",
+    "confidence",
 }
 
 
@@ -59,19 +97,44 @@ def validate_report(report_data: dict) -> tuple[bool, list[str]]:
         (True,  [])            if the report is valid.
         (False, [err1, ...])   if validation errors are found.
     """
+    rel_errors: list[str] = []
+    if isinstance(report_data, dict):
+        findings = report_data.get("findings")
+        if isinstance(findings, list):
+            fids = {f.get("id") for f in findings if isinstance(f, dict) and "id" in f}
+            for i, f in enumerate(findings):
+                if isinstance(f, dict) and "related_to" in f:
+                    rt = f["related_to"]
+                    if isinstance(rt, list):
+                        fid = f.get("id")
+                        for ref in rt:
+                            if isinstance(ref, str):
+                                if ref == fid:
+                                    rel_errors.append(
+                                        f"findings[{i}].related_to contains self-reference to '{fid}'"
+                                    )
+                                elif ref not in fids:
+                                    rel_errors.append(
+                                        f"findings[{i}].related_to contains dangling reference to nonexistent ID '{ref}'"
+                                    )
+
     # --- Try jsonschema first ---
     try:
         import jsonschema  # type: ignore[import]
         schema = _load_schema()
         if schema is not None:
-            return _validate_with_jsonschema(report_data, schema)
+            ok, js_errors = _validate_with_jsonschema(report_data, schema)
+            all_errors = js_errors + rel_errors
+            return (len(all_errors) == 0, all_errors)
     except ImportError:
         logger.info("jsonschema not installed; using built-in fallback validator.")
     except Exception as exc:
         logger.warning("jsonschema validation failed unexpectedly (%s); falling back.", exc)
 
     # --- Fallback ---
-    return _validate_fallback(report_data)
+    ok, fb_errors = _validate_fallback(report_data)
+    all_errors = fb_errors + [e for e in rel_errors if e not in fb_errors]
+    return (len(all_errors) == 0, all_errors)
 
 
 # ------------------------------------------------------------------
@@ -104,6 +167,11 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     if not isinstance(report_data, dict):
         return (False, ["Report root must be an object/dict."])
 
+    # --- Unexpected top-level keys ---
+    extra_top = set(report_data.keys()) - _TOP_LEVEL_ALLOWED
+    if extra_top:
+        errors.append(f"Report root has unexpected keys: {extra_top}")
+
     # --- Required top-level keys ---
     for key in ("schema_version", "generated_at", "target_url", "summary", "findings"):
         if key not in report_data:
@@ -119,26 +187,22 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     # --- Summary ---
     summary = report_data.get("summary")
     if isinstance(summary, dict):
+        extra_sum = set(summary.keys()) - _SUMMARY_ALLOWED
+        if extra_sum:
+            errors.append(f"summary has unexpected keys: {extra_sum}")
         for skey in ("total_findings", "critical", "high", "medium", "low", "info"):
             if skey not in summary:
                 errors.append(f"summary missing required key: '{skey}'")
             elif not isinstance(summary[skey], int):
                 errors.append(f"summary.{skey} must be an integer, got {type(summary[skey]).__name__}")
-        if "overall_score" in summary:
-            score = summary["overall_score"]
-            if not isinstance(score, (int, float)):
-                errors.append("summary.overall_score must be a number")
-            elif score < 0 or score > 100:
-                errors.append(f"summary.overall_score must be 0-100, got {score}")
-        if "grade" in summary:
-            grade = summary["grade"]
-            if grade not in _VALID_GRADES:
-                errors.append(f"summary.grade must be one of {_VALID_GRADES}, got '{grade}'")
         if "coverage" in summary:
             scov = summary["coverage"]
             if not isinstance(scov, dict):
                 errors.append("summary.coverage must be an object/dict")
             else:
+                extra_scov = set(scov.keys()) - _SUMMARY_COVERAGE_ALLOWED
+                if extra_scov:
+                    errors.append(f"summary.coverage has unexpected keys: {extra_scov}")
                 for k in ("pages_audited", "pages_in_sitemap", "budget_limited"):
                     if k not in scov:
                         errors.append(f"summary.coverage missing required key '{k}'")
@@ -154,8 +218,9 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     # --- Findings ---
     findings = report_data.get("findings")
     if isinstance(findings, list):
+        fids = {f.get("id") for f in findings if isinstance(f, dict) and "id" in f}
         for i, finding in enumerate(findings):
-            _validate_finding(finding, i, errors)
+            _validate_finding(finding, i, errors, fids)
     elif findings is not None:
         errors.append("findings must be an array/list")
 
@@ -195,12 +260,21 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     return (len(errors) == 0, errors)
 
 
-def _validate_finding(finding: Any, index: int, errors: list[str]) -> None:
+def _validate_finding(
+    finding: Any,
+    index: int,
+    errors: list[str],
+    all_finding_ids: set[str] | None = None,
+) -> None:
     """Validate a single Finding object."""
     prefix = f"findings[{index}]"
     if not isinstance(finding, dict):
         errors.append(f"{prefix} must be an object/dict")
         return
+
+    extra_f = set(finding.keys()) - _FINDING_ALLOWED
+    if extra_f:
+        errors.append(f"{prefix} has unexpected keys: {extra_f}")
 
     for key in ("id", "title", "severity", "category", "evidence", "suggested_action"):
         if key not in finding:
@@ -271,6 +345,14 @@ def _validate_finding(finding: Any, index: int, errors: list[str]) -> None:
             errors.append(f"{prefix}.related_to must be an array/list")
         elif not all(isinstance(x, str) for x in rt):
             errors.append(f"{prefix}.related_to items must be strings")
+        else:
+            for ref in rt:
+                if ref == fid:
+                    errors.append(f"{prefix}.related_to contains self-reference to '{fid}'")
+                elif all_finding_ids is not None and ref not in all_finding_ids:
+                    errors.append(
+                        f"{prefix}.related_to contains dangling reference to nonexistent ID '{ref}'"
+                    )
 
     # confidence (optional number between 0.0 and 1.0)
     if "confidence" in finding:

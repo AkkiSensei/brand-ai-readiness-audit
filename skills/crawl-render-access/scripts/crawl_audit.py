@@ -1,7 +1,7 @@
 """
 crawl_audit.py
 ==============
-Domain sub-skill: Crawl & Render Access (CR-001 -> CR-010)
+Domain sub-skill: Crawl & Render Access (CR-001 -> CR-008)
 
 Discovers the site crawl frontier (homepage + sitemap + internal links up to
 max_pages) and audits for AI-crawler accessibility issues.
@@ -80,7 +80,6 @@ AI_CRAWLERS: list[str] = _ROBOTS.get("known_ai_crawlers", [
 STALE_DAYS: int = int(
     _T.get("structured_data", {}).get("freshness_stale_age_days", 365)
 )
-UA_CLOAKING_THRESH: float = float(_CRAWL.get("ua_cloaking_discrepancy_threshold", 0.30))
 
 
 # ---------------------------------------------------------------------------
@@ -718,121 +717,7 @@ def _check_cr008(page_results: dict[str, PageResult]) -> list[dict]:
     return findings
 
 
-def _check_cr009(frontier: list[str], client: HttpClient) -> list[dict]:
-    """CR-009 (high): Detect UA-cloaking or content discrepancy between browser and AI crawler."""
-    findings: list[dict] = []
-    discrepancies: list[str] = []
 
-    # Sample up to 2 pages from frontier
-    sample = frontier[:2]
-    browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-    ai_ua = "Mozilla/5.0 (compatible; GPTBot/1.0; +https://openai.com/gptbot)"
-
-    for url in sample:
-        try:
-            res_browser = client.get(url, skip_robots_check=True, headers={"User-Agent": browser_ua})
-            res_ai = client.get(url, skip_robots_check=True, headers={"User-Agent": ai_ua})
-
-            # 1. Status code discrepancy (e.g. 200 for browser vs 401/403/block for AI crawler)
-            if res_browser.status_code == 200 and res_ai.status_code in (401, 403, 406):
-                discrepancies.append(f"{url} (browser HTTP 200 vs GPTBot HTTP {res_ai.status_code} block)")
-                continue
-
-            if not res_browser.soup or not res_ai.soup:
-                continue
-
-            def _clean_text(soup):
-                w = BeautifulSoup(str(soup), "html.parser")
-                for tag in w.find_all(["script", "style", "noscript", "meta", "link", "svg"]):
-                    tag.decompose()
-                return w.get_text(separator=" ", strip=True)
-
-            text_browser = _clean_text(res_browser.soup)
-            text_ai = _clean_text(res_ai.soup)
-
-            len_browser = len(text_browser)
-            len_ai = len(text_ai)
-            max_len = max(len_browser, len_ai)
-
-            if max_len > 100:
-                discrepancy_ratio = abs(len_browser - len_ai) / max_len
-                if discrepancy_ratio >= UA_CLOAKING_THRESH:
-                    discrepancies.append(
-                        f"{url} (browser={len_browser} chars, GPTBot={len_ai} chars, {discrepancy_ratio*100:.1f}% discrepancy)"
-                    )
-        except Exception as exc:
-            logger.debug("CR-009 error for %s: %s", url, exc)
-
-    if discrepancies:
-        findings.append(_finding(
-            "CR-009",
-            "User-Agent cloaking or content discrepancy detected for AI crawlers",
-            "high",
-            f"{len(discrepancies)} page(s) served substantially different or degraded content to AI crawlers vs browsers: "
-            + "; ".join(discrepancies[:3]),
-            "Ensure your web server, CDN, and paywall rules serve consistent semantic content to verified AI crawler user-agents. "
-            "Deliberate cloaking or content omission distorts AI brand comprehension.",
-            related=["CR-003", "CR-005"],
-        ))
-
-    return findings
-
-
-# Compiled once — locale-style path segments
-_LOCALE_PATH_RE = re.compile(
-    r"/(en|fr|de|es|it|pt|ja|zh|ar|hi)(-[A-Z]{2})?/"
-)
-
-
-def _check_cr010(page_results: dict[str, PageResult]) -> list[dict]:
-    """CR-010 (medium): Multilingual content without hreflang tags."""
-    findings: list[dict] = []
-    try:
-        # 1. Collect distinct locale signals from <html lang> attributes
-        distinct_locales: set[str] = set()
-        has_hreflang = False
-
-        for url, pr in page_results.items():
-            if not pr.soup:
-                continue
-
-            # Inspect <html lang="..."> attribute
-            html_tag = pr.soup.find("html")
-            if html_tag:
-                lang = html_tag.get("lang", "")
-                if lang:
-                    distinct_locales.add(lang[:2].lower())
-
-            # 2. Scan internal links for locale-style path segments
-            for a_tag in pr.soup.find_all("a", href=True):
-                href = a_tag["href"]
-                match = _LOCALE_PATH_RE.search(href)
-                if match:
-                    locale = match.group(1).lower()
-                    distinct_locales.add(locale)
-
-            # Check for existing hreflang alternate tags
-            if pr.soup.find("link", attrs={"rel": "alternate", "hreflang": True}):
-                has_hreflang = True
-
-        # 3. Emit finding only when multilingual signals exist AND
-        #    zero hreflang tags found across all pages
-        if len(distinct_locales) > 1 and not has_hreflang:
-            sorted_locales = sorted(distinct_locales)
-            findings.append(_finding(
-                "CR-010",
-                "Multilingual content without hreflang tags",
-                "medium",
-                f"Detected {len(distinct_locales)} locale signals "
-                f"({', '.join(sorted_locales)}) but zero hreflang "
-                f"alternate tags across {len(page_results)} pages checked.",
-                "Add <link rel='alternate' hreflang='xx'> tags for each "
-                "language/region variant so AI engines serve the correct "
-                "localized version.",
-            ))
-    except Exception as exc:
-        logger.debug("CR-010 error: %s", exc)
-    return findings
 
 
 # ===================================================================
@@ -880,7 +765,7 @@ def _proactive(
 # MAIN ENTRY POINT
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
-    """Execute Crawl & Render Access checks CR-001 -> CR-010.
+    """Execute Crawl & Render Access checks CR-001 -> CR-008.
 
     Returns the standard domain payload **plus** ``crawl_frontier`` and
     ``page_results`` for downstream skills.
@@ -919,8 +804,6 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_cr005(page_results))
     findings.extend(_check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots))
     findings.extend(_check_cr008(page_results))
-    findings.extend(_check_cr009(frontier, http_client))
-    findings.extend(_check_cr010(page_results))
 
     # 3. Proactive recommendations
     proactive = _proactive(page_results, target_url)

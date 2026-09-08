@@ -1,7 +1,7 @@
 """
 sfe_audit.py
 ============
-Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-011)
+Domain sub-skill: Structured Fact Extraction (SF-001 -> SF-008)
 
 Validates Schema.org JSON-LD markup, detects facts trapped in images/canvas/PDFs,
 and inspects document freshness metadata across the crawl frontier.
@@ -720,242 +720,6 @@ def _check_sf007_sf008(
     return findings
 
 
-# Punctuation translation table (strip all punctuation)
-_PUNCT_TABLE = str.maketrans("", "", string.punctuation)
-
-
-def _check_sf009(page_results: dict[str, PageResult]) -> list[dict]:
-    """SF-009 (medium): Near-duplicate content across pages."""
-    findings: list[dict] = []
-
-    # Cap O(n^2) comparison to stay within the 5-minute runtime budget
-    if len(page_results) > 30:
-        return findings
-
-    try:
-        # 1. Build content fingerprints per page
-        page_shingles: dict[str, set[int]] = {}
-
-        for url, pr in page_results.items():
-            if not pr.soup:
-                continue
-
-            # Extract visible text (same pattern as http_client extract_text_ratio)
-            from bs4 import BeautifulSoup
-            working = BeautifulSoup(str(pr.soup), "html.parser")
-            for tag in working.find_all(["script", "style", "noscript", "meta", "link"]):
-                tag.decompose()
-            text = working.get_text(separator=" ", strip=True)
-
-            # Normalize: lowercase, strip punctuation, collapse whitespace
-            text = text.lower().translate(_PUNCT_TABLE)
-            text = re.sub(r"\s+", " ", text).strip()
-
-            # 2. Compute 5-word shingles
-            words = text.split()
-            if len(words) < 5:
-                continue
-            shingles: set[int] = set()
-            for i in range(len(words) - 4):
-                shingle = " ".join(words[i:i + 5])
-                shingles.add(hash(shingle) % (2 ** 32))
-
-            # Skip pages with fewer than 20 shingles (too short)
-            if len(shingles) < 20:
-                continue
-
-            page_shingles[url] = shingles
-
-        # 3. Pairwise Jaccard similarity
-        duplicate_pairs: list[tuple[str, str]] = []
-        for url_a, url_b in combinations(page_shingles.keys(), 2):
-            set_a = page_shingles[url_a]
-            set_b = page_shingles[url_b]
-            union_size = len(set_a | set_b)
-            if union_size == 0:
-                continue
-            jaccard = len(set_a & set_b) / union_size
-            if jaccard > 0.85:
-                duplicate_pairs.append((url_a, url_b))
-
-        # 4. Emit finding if duplicates found
-        if duplicate_pairs:
-            dup_pages = {u for pair in duplicate_pairs for u in pair}
-            findings.append(_finding(
-                "SF-009",
-                "Near-duplicate content across pages",
-                "medium",
-                f"{len(duplicate_pairs)} page pair(s) share >85% content "
-                f"similarity: "
-                + "; ".join(
-                    f"{a} ~ {b}" for a, b in duplicate_pairs[:5]
-                ),
-                "Differentiate or canonicalize near-duplicate pages \u2014 AI "
-                "systems deduplicate similar pages before citing, so "
-                "duplicates compete with each other for the same citation "
-                "slot instead of both being cited.",
-                pages_affected=len(dup_pages),
-                pages_checked=len(page_results),
-            ))
-    except Exception as exc:
-        logger.debug("SF-009 error: %s", exc)
-    return findings
-
-
-def _check_sf010(page_results: dict[str, PageResult]) -> list[dict]:
-    """SF-010 (low): Pages missing Open Graph / Twitter Card metadata."""
-    findings: list[dict] = []
-    try:
-        total = 0
-        missing_both_count = 0
-
-        for url, pr in page_results.items():
-            if not pr.soup:
-                continue
-            total += 1
-
-            has_og_title = bool(
-                pr.soup.find("meta", attrs={"property": "og:title"})
-            )
-            has_og_desc = bool(
-                pr.soup.find("meta", attrs={"property": "og:description"})
-            )
-            # Also track og:image and twitter:card for completeness
-            # (not part of the threshold, but useful context)
-            # has_og_image = bool(
-            #     pr.soup.find("meta", attrs={"property": "og:image"})
-            # )
-            # has_twitter = bool(
-            #     pr.soup.find("meta", attrs={"name": "twitter:card"})
-            # )
-
-            if not has_og_title and not has_og_desc:
-                missing_both_count += 1
-
-        if total > 0 and missing_both_count > total / 2:
-            findings.append(_finding(
-                "SF-010",
-                "Pages missing Open Graph / Twitter Card metadata",
-                "low",
-                f"{missing_both_count} of {total} pages checked lack "
-                f"og:title/og:description meta tags.",
-                "Add Open Graph and Twitter Card meta tags to every page. "
-                "Some AI assistants (e.g. web-browsing modes) use these as "
-                "a fallback snippet source when JSON-LD is absent or thin.",
-                pages_affected=missing_both_count,
-                pages_checked=total,
-            ))
-    except Exception as exc:
-        logger.debug("SF-010 error: %s", exc)
-    return findings
-
-
-def _is_present_and_non_empty(val: Any) -> bool:
-    """Check if a field value is present and non-empty."""
-    if val is None:
-        return False
-    if isinstance(val, (str, list, dict)):
-        return len(val) > 0 and (not isinstance(val, str) or val.strip() != "")
-    return True
-
-
-def _check_offer_dict(offer_dict: dict) -> bool:
-    """Check if an Offer dictionary contains both priceValidUntil and availability."""
-    if not isinstance(offer_dict, dict):
-        return False
-    has_pvu = _is_present_and_non_empty(offer_dict.get("priceValidUntil"))
-    has_avail = _is_present_and_non_empty(offer_dict.get("availability"))
-    if has_pvu and has_avail:
-        return True
-    nested = offer_dict.get("offers")
-    if isinstance(nested, dict):
-        return _check_offer_dict(nested)
-    if isinstance(nested, list) and nested:
-        return all(_check_offer_dict(o) for o in nested if isinstance(o, dict))
-    return False
-
-
-def _node_has_valid_offer(node: dict) -> bool:
-    """Check whether a Product/Offer node has valid priceValidUntil and availability in its Offer."""
-    if not isinstance(node, dict):
-        return False
-    offers = node.get("offers")
-    if offers is not None and offers != "" and offers != []:
-        if isinstance(offers, dict):
-            return _check_offer_dict(offers)
-        if isinstance(offers, list):
-            offer_dicts = [o for o in offers if isinstance(o, dict)]
-            if not offer_dicts:
-                return False
-            return all(_check_offer_dict(o) for o in offer_dicts)
-        return False
-    node_types = [t.lower() for t in _get_types(node)]
-    if "offer" in node_types:
-        return _check_offer_dict(node)
-    return False
-
-
-def _check_sf011(page_results: dict[str, PageResult]) -> list[dict]:
-    """SF-011 (medium): Product/Offer schema missing price validity or availability."""
-    findings: list[dict] = []
-    try:
-        total_count = 0
-        missing_count = 0
-        seen_prs: set[int] = set()
-
-        for url, pr in page_results.items():
-            if not pr or not pr.soup:
-                continue
-            pr_id = id(pr)
-            if pr_id in seen_prs:
-                continue
-            seen_prs.add(pr_id)
-
-            blocks = _extract_jsonld_blocks(pr.soup)
-            if not blocks:
-                continue
-
-            for block in blocks:
-                if block.get("_parse_error") or not isinstance(block, dict):
-                    continue
-
-                nodes: list[dict] = []
-                seen_node_ids: set[int] = set()
-
-                block_types = [t.lower() for t in _get_types(block)]
-                if any(t in ("product", "offer") for t in block_types) or "offers" in block:
-                    nodes.append(block)
-                    seen_node_ids.add(id(block))
-
-                for entity, _ in _find_entities(block, ("product", "offer")):
-                    if id(entity) not in seen_node_ids:
-                        nodes.append(entity)
-                        seen_node_ids.add(id(entity))
-
-                for node in nodes:
-                    total_count += 1
-                    if not _node_has_valid_offer(node):
-                        missing_count += 1
-
-        if total_count > 0 and missing_count > total_count / 2:
-            findings.append(_finding(
-                "SF-011",
-                "Product/Offer schema missing price validity or availability",
-                "medium",
-                f"{missing_count} of {total_count} Product/Offer schema blocks lack "
-                f"priceValidUntil and/or availability.",
-                "Add priceValidUntil and availability (schema.org/ItemAvailability "
-                "values like InStock/OutOfStock) to every Offer block. Assistants "
-                "citing pricing need to know it's current — stale or ambiguous "
-                "availability makes them hedge or omit the price entirely.",
-                pages_affected=missing_count,
-                pages_checked=total_count,
-            ))
-    except Exception as exc:
-        logger.debug("SF-011 error: %s", exc)
-    return findings
-
-
 # ---------------------------------------------------------------------------
 # Date parsing helpers
 # ---------------------------------------------------------------------------
@@ -1054,7 +818,7 @@ def _proactive(frontier: list[str], page_results: dict[str, PageResult]) -> list
 # MAIN ENTRY POINT
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
-    """Execute Structured Fact Extraction checks SF-001 -> SF-011."""
+    """Execute Structured Fact Extraction checks SF-001 -> SF-008."""
     frontier: list[str] = kwargs.get("crawl_frontier", [target_url])
     page_results: dict[str, PageResult] = kwargs.get("page_results", {})
 
@@ -1079,9 +843,6 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_sf005(frontier, page_results, http_client))
     findings.extend(_check_sf006(frontier, page_results))
     findings.extend(_check_sf007_sf008(frontier, page_results))
-    findings.extend(_check_sf009(page_results))
-    findings.extend(_check_sf010(page_results))
-    findings.extend(_check_sf011(page_results))
 
     proactive = _proactive(frontier, page_results)
 

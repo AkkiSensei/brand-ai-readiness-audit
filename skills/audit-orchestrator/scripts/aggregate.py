@@ -76,21 +76,6 @@ def _load_thresholds() -> dict:
         return {}
 
 
-_T = _load_thresholds()
-_SCORING = _T.get("scoring", {})
-_WEIGHTS: dict[str, float] = _SCORING.get("weights", {
-    "crawl_render_access": 0.25,
-    "structured_fact_extraction": 0.30,
-    "trust_entity_corroboration": 0.25,
-    "engagement_retention": 0.20,
-})
-_SEVERITY_PENALTY: dict[str, int] = _SCORING.get("severity_penalty", {
-    "critical": 25, "high": 15, "medium": 8, "low": 3, "info": 0,
-})
-_GRADE_THRESHOLDS: dict[str, int] = _SCORING.get("grade_thresholds", {
-    "A": 85, "B": 70, "C": 55, "D": 40, "F": 0,
-})
-
 # Map from domain runner "domain" string -> schema category key
 _DOMAIN_TO_CATEGORY: dict[str, str] = {
     "crawl-render-access": "crawl_render_access",
@@ -279,72 +264,6 @@ def _clean_internal_fields(findings: list[dict]) -> list[dict]:
             if key.startswith("_"):
                 del f[key]
     return findings
-
-
-# ===================================================================
-# SCORING + GRADING
-# ===================================================================
-
-def _compute_score(findings: list[dict]) -> float:
-    """Compute composite 0-100 readiness score from findings.
-
-    Algorithm:
-      - Start at 100.
-      - For each domain, accumulate weighted penalties.
-      - Subtract penalties; clamp to [0, 100].
-    """
-    domain_penalties: dict[str, float] = {k: 0.0 for k in _WEIGHTS}
-
-    domain_to_key = {
-        "crawl-render-access": "crawl_render_access",
-        "structured-fact-extraction": "structured_fact_extraction",
-        "trust-entity-corroboration": "trust_entity_corroboration",
-        "engagement-retention": "engagement_retention",
-    }
-
-    for f in findings:
-        domain = f.get("_domain", "")
-        key = domain_to_key.get(domain)
-        if not key:
-            lid = f.get("local_id", "") or f.get("_local_id", "")
-            if lid.startswith("CR-"):
-                key = "crawl_render_access"
-            elif lid.startswith("SF-"):
-                key = "structured_fact_extraction"
-            elif lid.startswith("TC-"):
-                key = "trust_entity_corroboration"
-            elif lid.startswith("ER-"):
-                key = "engagement_retention"
-            else:
-                cat = f.get("category", "")
-                if cat in domain_penalties:
-                    key = cat
-                elif cat == "engagement":
-                    key = "engagement_retention"
-                elif cat == "discoverability":
-                    key = "crawl_render_access"
-        severity = f.get("severity", "info")
-        penalty = _SEVERITY_PENALTY.get(severity, 0)
-        if key and key in domain_penalties:
-            domain_penalties[key] += penalty
-
-    total_penalty = 0.0
-    for domain, weight in _WEIGHTS.items():
-        # Cap per-domain penalty at 100 (before weighting)
-        raw = min(domain_penalties.get(domain, 0.0), 100.0)
-        total_penalty += raw * weight
-
-    score = max(0.0, min(100.0, 100.0 - total_penalty))
-    return round(score, 1)
-
-
-def _compute_grade(score: float) -> str:
-    """Derive letter grade from score using configured thresholds."""
-    for grade in ("A", "B", "C", "D"):
-        threshold = _GRADE_THRESHOLDS.get(grade, 0)
-        if score >= threshold:
-            return grade
-    return "F"
 
 
 # ===================================================================
@@ -662,13 +581,7 @@ def _run_pipeline(
     # Re-resolve references
     sorted_findings = _resolve_related_to(sorted_findings)
 
-    # ==============================================================
-    # STEP 11: Scoring + grading
-    # ==============================================================
-    score = _compute_score(sorted_findings)
-    grade = _compute_grade(score)
-
-    # Clean internal fields after scoring
+    # Clean internal fields
     sorted_findings = _clean_internal_fields(sorted_findings)
 
     # ==============================================================
@@ -685,8 +598,6 @@ def _run_pipeline(
         "medium": sev_counts.get("medium", 0),
         "low": sev_counts.get("low", 0),
         "info": sev_counts.get("info", 0),
-        "overall_score": score,
-        "grade": grade,
     }
 
     # Propagate crawl coverage into summary

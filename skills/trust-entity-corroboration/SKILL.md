@@ -42,16 +42,20 @@ across multiple authoritative sources. This skill audits three pillars:
 
 ## Checks & Finding IDs
 
-| Finding ID                         | Severity | Trigger Condition                                |
-|------------------------------------|----------|--------------------------------------------------|
-| `no-sameas-links`                  | high     | No `sameAs` property in any JSON-LD block        |
-| `sameas-unresolvable`              | medium   | A `sameAs` URL returns non-2xx status            |
-| `nap-inconsistent-name`            | high     | Brand name varies across pages beyond threshold  |
-| `nap-inconsistent-address`         | medium   | Address format inconsistent across pages         |
-| `nap-inconsistent-phone`           | medium   | Phone number format inconsistent across pages    |
-| `missing-legal-name`              | low      | `legalName` absent from Organization schema      |
-| `missing-alternate-name`          | low      | Multiple name variants without `alternateName`   |
-| `brand-name-too-many-variants`    | medium   | Brand name appears in >N distinct capitalisations|
+| Check ID | Finding Title | Severity | Trigger Condition |
+|----------|---------------|----------|-------------------|
+| `TC-001` | No sameAs links in Organization schema | high | Organization schema lacks `sameAs` array |
+| `TC-001` | Invalid sameAs URLs in Organization schema | medium | Malformed or non-absolute sameAs URL strings |
+| `TC-001` | Insufficient sameAs external links | medium | Fewer than required authoritative sameAs links |
+| `TC-002` | Inconsistent brand name across pages | high | Brand name varies across pages beyond threshold |
+| `TC-002` | Inconsistent phone numbers across pages | medium | Multiple conflicting phone numbers detected |
+| `TC-002` | Inconsistent address information across pages | medium | Address discrepancies across crawled pages |
+| `TC-003` | Third-party entity claims could not be corroborated | high | On-site entity claims (e.g. Wikipedia, Wikidata, LinkedIn) failed external verification |
+| `TC-004` | Brand name is ambiguous without disambiguation | critical | Common dictionary word brand without legalName or disambiguatingDescription |
+| `TC-004` | Brand name appears in too many capitalisation variants | medium | Brand name found in >2 distinct capitalization styles |
+| `TC-005` | No external entity claims could be verified | medium | None of the claimed entity links could be independently verified |
+| `TC-006` | Organization schema missing disambiguation properties | medium | Organization schema lacks `legalName`, `description`, or identifier |
+| `TC-006` | No Organization schema found for entity disambiguation | medium | Zero Organization JSON-LD found for brand disambiguation |
 
 ## References
 

@@ -446,9 +446,7 @@ The output conforms strictly to `skills/audit-orchestrator/references/report.sch
     "high": 4,
     "medium": 3,
     "low": 0,
-    "info": 2,
-    "overall_score": 80.9,
-    "grade": "B"
+    "info": 2
   },
   "coverage": {
     "crawl_render_access": {

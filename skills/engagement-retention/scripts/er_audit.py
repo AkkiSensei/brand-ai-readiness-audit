@@ -68,6 +68,7 @@ VIEWPORT_WAIT_MS: int = int(_ENG.get("viewport_stable_wait_ms", 1500))
 BROKEN_LINK_SAMPLE_SIZE: int = int(_ENG.get("broken_link_sample_size", 25))
 BROKEN_LINK_RATIO_THRESHOLD: float = float(_ENG.get("broken_link_ratio_threshold", 0.05))
 SEARCH_PAGE_THRESHOLD: int = int(_ENG.get("search_page_threshold", 30))
+BREADCRUMB_MIN_DEPTH: int = int(_ENG.get("breadcrumb_min_depth", 2))
 
 # Overlay / interstitial CSS and class patterns
 _OVERLAY_CLASS_RE = re.compile(
@@ -102,13 +103,17 @@ def _extract_jsonld_blocks(soup: Any) -> list[dict]:
         try:
             data = json.loads(raw)
             if isinstance(data, list):
-                blocks.extend(data)
+                for item in data:
+                    if isinstance(item, dict):
+                        blocks.append(item)
             elif isinstance(data, dict):
                 if "@graph" in data:
                     graph = data["@graph"]
                     if isinstance(graph, list):
-                        blocks.extend(graph)
-                    else:
+                        for item in graph:
+                            if isinstance(item, dict):
+                                blocks.append(item)
+                    elif isinstance(graph, dict):
                         blocks.append(graph)
                 else:
                     blocks.append(data)
@@ -117,10 +122,12 @@ def _extract_jsonld_blocks(soup: Any) -> list[dict]:
     return blocks
 
 
-def _get_types(block: dict) -> list[str]:
+def _get_types(block: Any) -> list[str]:
+    if not isinstance(block, dict):
+        return []
     t = block.get("@type", "")
     if isinstance(t, list):
-        return [str(x).strip() for x in t]
+        return [str(x).strip() for x in t if x]
     return [str(t).strip()] if t else []
 
 
@@ -316,7 +323,7 @@ def _check_er002(
 
         for url in frontier:
             depth = _url_depth(url, root_url)
-            if depth < 2:
+            if depth < BREADCRUMB_MIN_DEPTH:
                 continue
 
             pr = page_results.get(url)

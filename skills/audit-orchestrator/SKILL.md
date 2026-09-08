@@ -5,7 +5,7 @@ description: >
   Entrypoint skill that coordinates end-to-end AI-readiness audits for brand
   websites. Delegates crawl, structured-data, entity, and engagement checks to
   four domain sub-skills; deduplicates findings; injects proactive
-  recommendations (PA-001..PA-006); computes a composite score and grade;
+  recommendations (PA-001..PA-006);
   validates the final report against report.schema.json.
 entrypoint: true
 tags:
@@ -32,8 +32,7 @@ allowed-tools: Read Write
 
 The **Audit Orchestrator** is the single entrypoint for the `brand-ai-readiness-audit`
 marketplace. It accepts a target URL, coordinates the four domain sub-skills in the
-correct execution order, merges and deduplicates findings, computes a weighted
-composite readiness score with letter grade, injects proactive recommendations, and
+correct execution order, merges and deduplicates findings, injects proactive recommendations, and
 produces a final JSON report validated against `references/report.schema.json`.
 
 ## Inputs
@@ -114,14 +113,6 @@ Proactive recommendations (PA-001..PA-006)
 Re-deduplicate + re-sort + re-assign IDs (F-001..F-NNN)
     |
     v
-Composite readiness score (0-100)
-  - Domain weights from thresholds.json
-  - Severity penalty deductions per finding
-    |
-    v
-Letter grade: A (>=85), B (>=70), C (>=55), D (>=40), F (<40)
-    |
-    v
 Summary counts + coverage metadata
     |
     v
@@ -140,7 +131,7 @@ A JSON document conforming to `references/report.schema.json` containing:
 - `target_url` — Audited root URL.
 - `pages_audited` — Total pages analysed across all domains.
 - `audit_duration_seconds` — Wall-clock execution time.
-- `summary` — Severity counts, composite score, and letter grade.
+- `summary` — Severity counts and crawl budget coverage metadata.
 - `findings` — Deduplicated, severity-sorted findings with sequential IDs (`F-001`..`F-NNN`), category (`discoverability`, `engagement`, `proactive`), evidence string/object, structured `suggested_action` (`{summary, priority}`), and `related_to` cross-references.
 - `proactive_recommendations` — Strategic advice strings from domain runners.
 - `coverage` — Per-domain pages_checked, checks_run, and error counts.

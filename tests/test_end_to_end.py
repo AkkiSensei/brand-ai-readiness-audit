@@ -190,15 +190,13 @@ def run_test() -> int:
     if all_refs_valid:
         print(f"    OK: all related_to references resolve to valid final IDs")
 
-    # ---- 10. Grade and Score bounds ----
-    print("[10] Verifying score and grade ...")
-    grade = summary.get("grade")
-    score = summary.get("overall_score")
-    if grade in ("A", "B", "C", "D", "F") and isinstance(score, (int, float)) and 0 <= score <= 100:
-        print(f"    OK: grade={grade} score={score} (bounded 0-100)")
+    # ---- 10. Grade and Score absence ----
+    print("[10] Verifying absence of score and grade ...")
+    if "overall_score" in summary or "grade" in summary:
+        failures.append("summary must not contain overall_score or grade")
+        print(f"    FAIL: summary contains unexpected score/grade")
     else:
-        failures.append(f"Invalid grade ({grade}) or score ({score})")
-        print(f"    FAIL: grade={grade} score={score}")
+        print(f"    OK: overall_score and grade absent from summary")
 
     # ---- 11. Section 34 Contract Verification & Rejection Tests ----
     print("[11] Section 34 Contract Harmonization Verification ...")
@@ -285,8 +283,6 @@ def run_test() -> int:
     print(f"    Medium:         {summary.get('medium', 0)}")
     print(f"    Low:            {summary.get('low', 0)}")
     print(f"    Info:           {summary.get('info', 0)}")
-    print(f"  Score:            {score}")
-    print(f"  Grade:            {grade}")
     print(f"  Proactive recs:   {len(report.get('proactive_recommendations', []))}")
     print(f"  Coverage domains: {len(report.get('coverage', {}))}")
 

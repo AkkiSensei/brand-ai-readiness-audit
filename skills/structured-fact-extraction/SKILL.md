@@ -39,16 +39,22 @@ Ensures that factual brand content is machine-readable by AI engines, covering:
 
 ## Checks & Finding IDs
 
-| Finding ID                         | Severity | Trigger Condition                                |
-|------------------------------------|----------|--------------------------------------------------|
-| `missing-jsonld-organization`      | high     | No Organization schema on homepage               |
-| `invalid-jsonld-syntax`            | high     | JSON-LD block fails JSON parse                   |
-| `jsonld-missing-required-field`    | medium   | Required schema property absent                  |
-| `facts-in-images-only`             | medium   | Key facts found only in image content attributes |
-| `canvas-element-detected`          | medium   | `<canvas>` element with no accessible fallback   |
-| `pdf-linked-no-text-alternative`   | low      | Linked PDF has no HTML text equivalent           |
-| `stale-content-metadata`           | medium   | Page freshness older than stale threshold        |
-| `missing-freshness-metadata`       | low      | No `dateModified`, `Last-Modified`, or equivalent|
+| Check ID | Finding Title | Severity | Trigger Condition |
+|----------|---------------|----------|-------------------|
+| `SF-001` | No JSON-LD structured data found on any page | high | Zero valid JSON-LD script tags found on crawled pages |
+| `SF-001` | No Organization schema on homepage | high | Homepage lacks Organization or LocalBusiness schema |
+| `SF-001` | Organization schema is nested rather than top-level | low | Organization entity exists only as sub-property |
+| `SF-002` | Invalid JSON-LD syntax detected | high | JSON-LD block fails JSON parser |
+| `SF-002` | JSON-LD schemas missing recommended properties | medium | Missing recommended schema fields (logo, contactPoint, etc.) |
+| `SF-003` | Key facts trapped in images without text alternatives | critical | Important pricing, contact, or specification facts only in images |
+| `SF-004` | Canvas elements without accessible fallback content | medium | `<canvas>` elements lack fallback DOM text |
+| `SF-004` | Video elements without caption tracks | medium | `<video>` elements lack `<track kind="captions">` |
+| `SF-005` | PDFs linked without HTML text alternative content | high | Linked PDF documents lack HTML summary or transcript |
+| `SF-006` | Q&A content detected without FAQPage schema | medium | FAQ/Q&A patterns detected in HTML without FAQPage JSON-LD |
+| `SF-007` | Pages with stale content metadata | medium | Content `dateModified` older than stale threshold (365 days) |
+| `SF-007` | Pages missing freshness metadata | low | No `dateModified`, `Last-Modified`, or freshness date signals |
+| `SF-008` | Duplicate or generic page titles detected | medium | Identical or boilerplate `<title>` across multiple pages |
+| `SF-008` | Duplicate meta descriptions detected | medium | Identical meta descriptions across multiple distinct URLs |
 
 ## References
 

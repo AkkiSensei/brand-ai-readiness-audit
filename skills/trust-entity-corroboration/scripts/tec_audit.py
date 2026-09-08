@@ -54,6 +54,7 @@ _ENT = _T.get("entity", {})
 
 NAP_MIN_RATIO: float = float(_ENT.get("nap_consistency_min_ratio", 0.80))
 SAMEAS_MIN: int = int(_ENT.get("sameas_min_external_links", 1))
+MAX_CORROBORATION_QUERIES: int = int(_ENT.get("corroboration_max_queries", 3))
 MAX_NAME_VARIANTS: int = int(_ENT.get("brand_name_max_variations", 2))
 ADDR_SIM_THRESH: float = float(_ENT.get("address_similarity_threshold", 0.85))
 PHONE_RE_PATTERN: str = _ENT.get(
@@ -229,7 +230,6 @@ def _check_tc001(
         # Validate sameAs URLs
         unique_sameas = list(set(all_sameas))
         invalid_urls: list[str] = []
-        unresolvable: list[str] = []
         non_authoritative: list[str] = []
 
         for sa_url in unique_sameas:
@@ -249,20 +249,6 @@ def _check_tc001(
             if not is_auth:
                 non_authoritative.append(sa_url)
 
-            # Verify resolvability (HEAD request, up to 3 total)
-            if len(unresolvable) + len(invalid_urls) < 3:
-                try:
-                    head_result = http_client.head(sa_url)
-                    if head_result.status_code is not None:
-                        if head_result.status_code >= 400:
-                            unresolvable.append(
-                                f"{sa_url} (HTTP {head_result.status_code})"
-                            )
-                    elif head_result.error:
-                        unresolvable.append(f"{sa_url} ({head_result.error[:60]})")
-                except Exception:
-                    unresolvable.append(f"{sa_url} (request failed)")
-
         if invalid_urls:
             findings.append(_finding(
                 "TC-001",
@@ -272,18 +258,6 @@ def _check_tc001(
                 + "; ".join(invalid_urls[:5]),
                 "Fix or remove invalid sameAs URLs. Each must be a valid "
                 "HTTP/HTTPS URL pointing to an authoritative profile.",
-            ))
-
-        if unresolvable:
-            findings.append(_finding(
-                "TC-001",
-                "Unresolvable sameAs URLs detected",
-                "medium",
-                f"{len(unresolvable)} sameAs URL(s) return errors: "
-                + "; ".join(unresolvable[:5]),
-                "Update or remove broken sameAs links. Dead links undermine "
-                "entity corroboration trust signals.",
-                related=["TC-003"],
             ))
 
         if len(unique_sameas) < SAMEAS_MIN and not invalid_urls:
@@ -473,7 +447,7 @@ def _check_tc003_tc005(
 
         verified = 0
         failed: list[str] = []
-        for sa_url in unique[:3]:
+        for sa_url in unique[:MAX_CORROBORATION_QUERIES]:
             try:
                 head = http_client.head(sa_url)
                 is_walled_garden = any(d in sa_url.lower() for d in ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com"))

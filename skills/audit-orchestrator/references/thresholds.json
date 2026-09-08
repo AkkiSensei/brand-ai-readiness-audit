@@ -26,8 +26,7 @@
       ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
       ".mp4", ".mp3", ".zip", ".gz", ".tar", ".woff", ".woff2",
       ".ttf", ".eot", ".ico", ".css", ".js"
-    ],
-    "ua_cloaking_discrepancy_threshold": 0.30
+    ]
   },
 
   "render": {
@@ -71,6 +70,7 @@
   "entity": {
     "nap_consistency_min_ratio": 0.80,
     "sameas_min_external_links": 1,
+    "corroboration_max_queries": 3,
     "brand_name_max_variations": 2,
     "address_similarity_threshold": 0.85,
     "phone_normalization_pattern": "^\\+?[0-9\\s\\-\\(\\)]{7,20}$"
@@ -86,30 +86,8 @@
     "viewport_stable_wait_ms": 1500,
     "broken_link_sample_size": 25,
     "broken_link_ratio_threshold": 0.05,
-    "search_page_threshold": 30
-  },
-
-  "scoring": {
-    "weights": {
-      "crawl_render_access": 0.25,
-      "structured_fact_extraction": 0.30,
-      "trust_entity_corroboration": 0.25,
-      "engagement_retention": 0.20
-    },
-    "severity_penalty": {
-      "critical": 25,
-      "high": 15,
-      "medium": 8,
-      "low": 3,
-      "info": 0
-    },
-    "grade_thresholds": {
-      "A": 85,
-      "B": 70,
-      "C": 55,
-      "D": 40,
-      "F": 0
-    }
+    "search_page_threshold": 30,
+    "breadcrumb_min_depth": 2
   },
 
   "proactive": {

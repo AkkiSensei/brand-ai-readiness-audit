@@ -69,17 +69,6 @@
           "type": "integer",
           "minimum": 0
         },
-        "overall_score": {
-          "type": "number",
-          "description": "Composite AI-readiness score from 0 (worst) to 100 (best).",
-          "minimum": 0,
-          "maximum": 100
-        },
-        "grade": {
-          "type": "string",
-          "description": "Letter grade derived from overall_score.",
-          "enum": ["A", "B", "C", "D", "F"]
-        },
         "coverage": {
           "type": "object",
           "description": "Crawl budget coverage metadata indicating whether the audit was limited by max_pages.",

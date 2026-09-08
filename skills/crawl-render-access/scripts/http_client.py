@@ -620,6 +620,12 @@ class HttpClient:
             result.fetch_duration_seconds = time.monotonic() - t0
             result.error = f"Unexpected error fetching {url}: {exc}"
             logger.exception(result.error)
+        finally:
+            if resp is not None:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
 
         return result
 

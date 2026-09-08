@@ -161,14 +161,10 @@ def _verify_report_integrity(report: dict) -> tuple[bool, list[str]]:
             if ref not in id_set:
                 errors.append(f"Dangling related_to target '{ref}' in finding {f.get('id')}")
 
-    # 5. Score & Grade
+    # 5. Verify absence of Score & Grade
     summary = report.get("summary", {})
-    score = summary.get("overall_score", -1)
-    grade = summary.get("grade", "")
-    if not (0.0 <= score <= 100.0):
-        errors.append(f"Score out of bounds: {score}")
-    if grade not in ("A", "B", "C", "D", "F"):
-        errors.append(f"Invalid grade: {grade}")
+    if "overall_score" in summary or "grade" in summary:
+        errors.append("summary must not contain overall_score or grade")
 
     return len(errors) == 0, errors
 
@@ -201,11 +197,9 @@ def run_chaos_suite() -> int:
         t0 = time.time()
         zb_exc = "NONE"
         zb_valid = False
-        zb_score = -1.0
         try:
             report_zb = run_audit(zb_url, max_pages=2)
             zb_valid, zb_errs = _verify_report_integrity(report_zb)
-            zb_score = report_zb.get("summary", {}).get("overall_score", -1.0)
         except Exception as exc:
             zb_exc = f"{type(exc).__name__}: {exc}"
 
@@ -219,7 +213,6 @@ def run_chaos_suite() -> int:
         print(f"  Duration: {zb_dur}s")
         print(f"  Exception: {zb_exc}")
         print(f"  Schema: {'PASS' if zb_valid else 'FAIL'}")
-        print(f"  Score: {zb_score}")
         print(f"  Result: {'PASS' if zb_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
@@ -230,11 +223,9 @@ def run_chaos_suite() -> int:
         t0 = time.time()
         gb_exc = "NONE"
         gb_valid = False
-        gb_score = -1.0
         try:
             report_gb = run_audit(gb_url, max_pages=2)
             gb_valid, gb_errs = _verify_report_integrity(report_gb)
-            gb_score = report_gb.get("summary", {}).get("overall_score", -1.0)
         except Exception as exc:
             gb_exc = f"{type(exc).__name__}: {exc}"
 
@@ -248,7 +239,6 @@ def run_chaos_suite() -> int:
         print(f"  Duration: {gb_dur}s")
         print(f"  Exception: {gb_exc}")
         print(f"  Schema: {'PASS' if gb_valid else 'FAIL'}")
-        print(f"  Score: {gb_score}")
         print(f"  Result: {'PASS' if gb_pass else 'FAIL'}")
 
         # -------------------------------------------------------------

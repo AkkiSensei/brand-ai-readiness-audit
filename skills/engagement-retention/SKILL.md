@@ -44,16 +44,21 @@ This skill audits three pillars:
 
 ## Checks & Finding IDs
 
-| Finding ID                         | Severity | Trigger Condition                                |
-|------------------------------------|----------|--------------------------------------------------|
-| `missing-h1-above-fold`            | high     | No `<h1>` in the first viewport                  |
-| `missing-nav-above-fold`           | medium   | No `<nav>` or equivalent above the fold          |
-| `interstitial-full-page-overlay`   | high     | Fixed/absolute element covers >60% of viewport  |
-| `interstitial-cookie-banner`       | medium   | Cookie consent element detected post-load        |
-| `interstitial-newsletter-modal`    | low      | Newsletter/subscribe modal detected post-load    |
-| `viewport-late-injected-fixed`     | medium   | Fixed-position element injected after load       |
-| `multiple-h1-tags`                 | low      | More than one `<h1>` on a single page            |
-| `nav-aria-missing`                 | low      | `<nav>` element lacks `aria-label`               |
+| Check ID | Finding Title | Severity | Trigger Condition |
+|----------|---------------|----------|-------------------|
+| `ER-001` | Pages missing visible H1 heading | high | Zero visible `<h1>` element above the fold |
+| `ER-001` | Pages missing primary navigation | medium | Lack of `<nav>` or navigation container with >=3 links |
+| `ER-001` | Multiple H1 tags on a single page | low | More than one `<h1>` heading found on a single page |
+| `ER-002` | Deep pages missing breadcrumb navigation | medium | Page at depth >= 2 lacks BreadcrumbList schema or breadcrumb `<nav>` |
+| `ER-003` | Full-page interstitial overlay detected | high | Fixed/absolute overlay with high z-index obscuring content |
+| `ER-003` | Cookie consent banner detected on pages | medium | Intrusive full-screen blocking consent overlay |
+| `ER-003` | Newsletter subscription modal detected | low | Newsletter / signup popup detected |
+| `ER-004` | High broken internal link ratio | info | Broken internal link ratio > 5% |
+| `ER-004` | Broken internal links detected | medium | Sampled internal links return 4xx/5xx |
+| `ER-005` | Product/landing pages missing clear CTA | medium | Conversion page lacks recognizable call-to-action button |
+| `ER-006` | Pages missing viewport meta tag | high | HTML page lacks `<meta name="viewport">` |
+| `ER-007` | Viewport meta restricts user zoom | medium | Viewport specifies `user-scalable=no` or `maximum-scale=1` |
+| `ER-008` | No site search functionality detected on large site | low | Site with >30 crawled pages lacks search input or SearchAction schema |
 
 ## References
 
