@@ -163,7 +163,7 @@ The project conforms to the **agentskills.io** modular marketplace standard. The
 * **Key Responsibilities**:
   * Validates `sameAs` link arrays in `Organization` schema, ensuring presence, URI validity, and external resolvability to authoritative nodes such as Wikidata, Wikipedia, and LinkedIn (`TC-001`).
   * Enforces multi-page Name, Address, and Phone (NAP) consistency across crawled headers, footers, and contact pages (`TC-002`).
-  * Issues lightweight, rate-limited HEAD requests to corroborate claimed third-party affiliations and accreditations (`TC-003`, `TC-005`).
+  * Evaluates on-page accreditation, certification, and partnership authority claims, issuing rate-limited HEAD requests to verify outbound credentials (`TC-003`) or flagging unlinked, unverifiable claims (`TC-005`).
   * Evaluates brand name ambiguity: flags common dictionary words or homonyms used as brand names without entity disambiguators (`TC-004`).
   * Audits `Organization` schema completeness for corporate disambiguation attributes (`foundingDate`, `legalName`, `taxID`, `vatID`) (`TC-006`).
 
@@ -567,6 +567,12 @@ The audit engine is designed to operate safely as a read-only evaluation client 
 The repository includes an automated test suite confirming end-to-end operational integrity:
 
 ```bash
+# Execute targeted claim corroboration semantic tests (TC-003 & TC-005)
+python tests/test_claim_corroboration.py
+
+# Execute archetype matrix validation across all 8 web fixtures
+python tests/test_archetypes.py
+
 # Execute integration smoke test across all 4 domain runners
 python tests/dry_run_test.py
 
@@ -576,9 +582,11 @@ python tests/test_end_to_end.py
 
 ### Verified Test Results
 
-* **AST Syntax Verification**: All 10 Python source and test files pass Python AST syntax parsing with 0 errors.
-* **Dry-Run Smoke Test**: All 4 domain runners execute cleanly against live targets without unhandled exceptions.
-* **End-to-End Test**: The master orchestrator executes against `https://example.com`, parses stdout JSON, validates sequential `F-001..F-NNN` IDs, confirms severity ordering, verifies `related_to` cross-references, validates output against `report.schema.json`, and verifies that malformed test values are rejected.
+* **AST Syntax Verification**: All Python source and test files pass Python AST syntax parsing with 0 errors.
+* **Claim Corroboration Semantic Test (`test_claim_corroboration.py`)**: Confirms strict semantic separation between `TC-001` (sameAs entity graph), `TC-003` (broken outbound accreditation links verified via HTTP HEAD), and `TC-005` (authority claims lacking outbound verification links), while proving zero false positives on generic commercial phrases ("partner with us", "certification course").
+* **Archetype Matrix Validation (`test_archetypes.py`)**: 9/9 PASS across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML) with zero false-positive regressions.
+* **Dry-Run Smoke Test (`dry_run_test.py`)**: All 4 domain runners execute cleanly against live targets without unhandled exceptions.
+* **End-to-End Test (`test_end_to_end.py`)**: The master orchestrator executes against `https://example.com`, parses stdout JSON, validates sequential `F-001..F-NNN` IDs, confirms severity ordering, verifies `related_to` cross-references, validates output against `report.schema.json`, and verifies that malformed test values are rejected.
 
 ---
 
