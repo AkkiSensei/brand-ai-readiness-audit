@@ -44,7 +44,9 @@ _COVERAGE_KEYS = _DOMAIN_COVERAGE_KEYS | {
 _TOP_LEVEL_ALLOWED = {
     "schema_version",
     "generated_at",
+    "audited_at",
     "target_url",
+    "site",
     "pages_audited",
     "audit_duration_seconds",
     "summary",
@@ -173,14 +175,16 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
         errors.append(f"Report root has unexpected keys: {extra_top}")
 
     # --- Required top-level keys ---
-    for key in ("schema_version", "generated_at", "target_url", "summary", "findings"):
+    for key in ("schema_version", "generated_at", "audited_at", "target_url", "site", "summary", "findings"):
         if key not in report_data:
             errors.append(f"Missing required top-level key: '{key}'")
 
     # --- Type checks ---
     _check_type(report_data, "schema_version", str, errors)
     _check_type(report_data, "generated_at", str, errors)
+    _check_type(report_data, "audited_at", str, errors)
     _check_type(report_data, "target_url", str, errors)
+    _check_type(report_data, "site", str, errors)
     _check_type(report_data, "pages_audited", int, errors, optional=True)
     _check_type(report_data, "audit_duration_seconds", (int, float), errors, optional=True)
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import random
 import re
 import sys
 import urllib.parse
@@ -512,10 +511,10 @@ def _check_er004(
         if not all_internal_links:
             return findings
 
-        # Sample up to 25 links
+        # Sample up to 25 links deterministically (sorted slice — same input → same output)
         sample_size = min(BROKEN_LINK_SAMPLE_SIZE, len(all_internal_links))
         if len(all_internal_links) > BROKEN_LINK_SAMPLE_SIZE:
-            sample = random.sample(all_internal_links, BROKEN_LINK_SAMPLE_SIZE)
+            sample = sorted(all_internal_links)[:BROKEN_LINK_SAMPLE_SIZE]
         else:
             sample = all_internal_links
 

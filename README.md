@@ -33,7 +33,7 @@ Many modern audit tools attempt to use large language models (LLMs) to grade web
 
 In contrast, **`brand-ai-readiness-audit` operates as a zero-model-weight, rule-based expert engine**:
 
-* **Deterministic Rule Execution**: 30 defect heuristics and 6 proactive recommendations evaluate concrete, observable HTML, HTTP, and JSON-LD primitives. Running the audit multiple times against identical static responses yields bit-identical findings.
+* **Deterministic Rule Execution**: 30 defect heuristics and 6 proactive recommendations evaluate concrete, observable HTML, HTTP, and JSON-LD primitives. Running the audit multiple times against identical static responses yields bit-identical findings. All internal link sampling (ER-004) uses a deterministic sorted slice (`sorted(links)[:N]`) — no `random` module is used anywhere in the audit engine.
 * **Evidence-Backed Attribution**: Every finding is accompanied by the exact URI, violating code snippet or metric, and an actionable remediation summary.
 * **Bounded Operational Footprint**: Crawling is capped at configurable page budgets (default 15 pages), rate-limited to 1 request per second per host, protected by exponential retry backoffs, and executed within a strict wall-clock timeout budget (default 240s).
 * **Portability**: The entire suite runs on standard Python 3.10+ environments using lightweight dependencies (`requests`, `beautifulsoup4`, `lxml`, `jsonschema`). Browser-based headless DOM rendering (`playwright`) is dynamic and optional: if unavailable, the engine falls back gracefully to server-side HTML heuristics without crashing.
@@ -590,6 +590,80 @@ python tests/test_end_to_end.py
 
 ---
 
-## 9. License
+## 9. Changelog
+
+### v1.0.1 — Hardening Pass (2026-09-09)
+
+#### C1 — ER-004 Determinism Fix
+
+**Problem**: `er_audit.py` used `random.sample(all_internal_links, N)` for ER-004 broken-link sampling. This meant two runs against identical crawl output could select different link subsets, potentially producing different findings.
+
+**Fix** (`skills/engagement-retention/scripts/er_audit.py`, line 518):
+
+```diff
+-            sample = random.sample(all_internal_links, BROKEN_LINK_SAMPLE_SIZE)
++            sample = sorted(all_internal_links)[:BROKEN_LINK_SAMPLE_SIZE]
+```
+
+The `import random` statement was also removed as it became unused. The engine now uses a deterministic, alphabetically-sorted slice. Same input → same output, every run.
+
+**Verified**: `python -m pytest tests/ -v` → 4/4 PASS after fix.
+
+#### TC-003 / TC-005 Semantic Separation
+
+**Problem**: Previous implementations conflated sameAs URL checking (TC-001) with outbound accreditation link verification (TC-003 / TC-005).
+
+**Fix** (`skills/trust-entity-corroboration/scripts/tec_audit.py`):
+- **TC-003**: Issues HTTP HEAD requests only against outbound links adjacent to textual authority claims ("certified by", "authorized partner", etc.) detected by `_CLAIM_RE`. Fires only when those links return 4xx/5xx.
+- **TC-005**: Fires when authority claims exist in page content but have zero outbound verification links — entirely independent of sameAs data.
+- `_FP_RE` suppresses false positives on commercial phrases ("partner with us", "certification course", "become a member").
+
+**Verified**: `tests/test_claim_corroboration.py` — 4/4 semantic cases PASS:
+
+| Case | Description | Expected | Actual |
+|------|-------------|----------|--------|
+| A | Broken sameAs URL only — no claim text | TC-003/005 silent | PASS |
+| B | Claim + broken outbound link | TC-003 fires | PASS |
+| C | Claim + no outbound link | TC-005 fires | PASS |
+| D | Generic non-authority phrases | Both silent | PASS |
+
+#### C4 — Exponential Backoff (Already Implemented)
+
+Verified present in `http_client.py` (line 439):
+
+```python
+Retry(total=2, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET", "HEAD"])
+```
+
+No change required.
+
+#### A4 — Live Schema Validation Against boat-lifestyle.com
+
+Live audit run (`--max-pages 10`), 2026-09-09, validated against `report.schema.json` via jsonschema:
+
+```
+SCHEMA VALIDATION: PASS
+pages_audited: 10
+autit_duration_seconds: 48.18
+total_findings: 11 (1 high, 5 medium, 2 low, 3 info)
+```
+
+| Finding | Rule | Severity |
+|---------|------|----------|
+| Invalid JSON-LD syntax detected | SF-002 | HIGH |
+| Duplicate meta descriptions | SF-008 | MEDIUM |
+| Duplicate page titles | SF-008 | MEDIUM |
+| Inconsistent address across pages | TC-002 | MEDIUM |
+| Organization schema missing disambiguation | TC-006 | MEDIUM |
+| Stale content metadata (5 pages) | SF-007 | MEDIUM |
+| Multiple H1 on one page | ER-001 | LOW |
+| Newsletter modal (9 pages) | ER-003 | LOW |
+| No RSS/Atom feed | PA-005 | INFO |
+| No explicit AI crawler Allow in robots.txt | PA-006 | INFO |
+| Section headings lack fragment IDs | PA-003 | INFO |
+
+---
+
+## 10. License
 
 This project is licensed under the **MIT License**. Created for the **Adobe University Hackathon 2026 — Round 3**.

@@ -7,7 +7,9 @@
   "required": [
     "schema_version",
     "generated_at",
+    "audited_at",
     "target_url",
+    "site",
     "summary",
     "findings"
   ],
@@ -24,9 +26,19 @@
       "description": "ISO-8601 UTC timestamp when the report was generated.",
       "format": "date-time"
     },
+    "audited_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp when the audit was performed (hackathon required alias for generated_at).",
+      "format": "date-time"
+    },
     "target_url": {
       "type": "string",
       "description": "The canonical root URL that was audited.",
+      "format": "uri"
+    },
+    "site": {
+      "type": "string",
+      "description": "The audited site URL (hackathon required alias for target_url).",
       "format": "uri"
     },
     "pages_audited": {

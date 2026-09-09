@@ -628,7 +628,9 @@ def _run_pipeline(
     report: dict[str, Any] = {
         "schema_version": "1.0.0",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "audited_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "target_url": target_url,
+        "site": target_url,
         "pages_audited": (
             (domain_results.get("crawl-render-access") or {}).get("pages_analyzed")
             or len(frontier)
