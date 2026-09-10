@@ -108,6 +108,18 @@ class ArchetypeRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(content)
             return
 
+        if self.path == "/10_waf_challenge.html":
+            fixture_path = _REPO_ROOT / "tests" / "fixtures" / "10_waf_challenge.html"
+            content = fixture_path.read_bytes()
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Server", "AkamaiGHost")
+            self.send_header("Akamai-GRN", "0.24f43717.1789018094.d0bf2fb")
+            self.end_headers()
+            self.wfile.write(content)
+            return
+
         # Serve static assets or fixtures
         super().do_GET()
 
@@ -193,13 +205,13 @@ def run_archetype_matrix() -> int:
     print(f"  Port: {port}")
 
     passed_count = 0
-    total_count = 9
+    total_count = 11
     schema_all_passed = True
     false_positive_regressions = 0
 
     try:
         # -------------------------------------------------------------
-        # [1/8] SPA
+        # [1/11] SPA
         # -------------------------------------------------------------
         spa_file = "1_spa.html"
         ArchetypeRequestHandler.active_fixture = spa_file
@@ -217,7 +229,7 @@ def run_archetype_matrix() -> int:
         if spa_pass:
             passed_count += 1
 
-        print(f"\n[1/8] SPA")
+        print(f"\n[1/11] SPA")
         print(f"  Fixture: {spa_file}")
         print(f"  URL: {spa_url}")
         print(f"  Duration: {spa_duration}s")
@@ -227,7 +239,7 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if spa_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [2/8] E-commerce
+        # [2/11] E-commerce
         # -------------------------------------------------------------
         ecom_file = "2_ecommerce.html"
         ArchetypeRequestHandler.active_fixture = ecom_file
@@ -248,7 +260,7 @@ def run_archetype_matrix() -> int:
         if ecom_pass:
             passed_count += 1
 
-        print(f"\n[2/8] E-commerce")
+        print(f"\n[2/11] E-commerce")
         print(f"  Fixture: {ecom_file}")
         print(f"  URL: {ecom_url}")
         print(f"  Duration: {ecom_duration}s")
@@ -261,7 +273,7 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if ecom_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [3/8] Legacy
+        # [3/11] Legacy
         # -------------------------------------------------------------
         legacy_file = "3_legacy.html"
         ArchetypeRequestHandler.active_fixture = legacy_file
@@ -278,11 +290,12 @@ def run_archetype_matrix() -> int:
         leg_g1 = ("ER-006" in legacy_rules or "ER-007" in legacy_rules)
         leg_g2 = ("TC-001" in legacy_rules or "TC-006" in legacy_rules)
         leg_no_cr = ("CR-003" not in legacy_rules and "CR-004" not in legacy_rules)
-        legacy_pass = leg_g1 and leg_g2 and leg_no_cr and legacy_schema_valid
+        leg_no_waf = ("CR-002" not in legacy_rules)
+        legacy_pass = leg_g1 and leg_g2 and leg_no_cr and leg_no_waf and legacy_schema_valid
         if legacy_pass:
             passed_count += 1
 
-        print(f"\n[3/8] Legacy")
+        print(f"\n[3/11] Legacy")
         print(f"  Fixture: {legacy_file}")
         print(f"  URL: {legacy_url}")
         print(f"  Duration: {legacy_duration}s")
@@ -290,12 +303,13 @@ def run_archetype_matrix() -> int:
         print(f"    - ER-006 OR ER-007")
         print(f"    - TC-001 OR TC-006")
         print(f"    - CR-003/CR-004 absent")
+        print(f"    - CR-002 (WAF) absent")
         print(f"  Detected: {legacy_rules}")
         print(f"  Schema: {'PASS' if legacy_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if legacy_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [4/8] Blog
+        # [4/11] Blog
         # -------------------------------------------------------------
         blog_file = "4_blog.html"
         ArchetypeRequestHandler.active_fixture = blog_file
@@ -312,24 +326,25 @@ def run_archetype_matrix() -> int:
         blog_pos = ("SF-006" in blog_rules)
         blog_neg = ("SF-007" not in blog_rules)
         blog_no_cr = ("CR-003" not in blog_rules and "CR-004" not in blog_rules)
-        blog_pass = blog_pos and blog_neg and blog_no_cr and blog_schema_valid
+        blog_no_waf = ("CR-002" not in blog_rules)
+        blog_pass = blog_pos and blog_neg and blog_no_cr and blog_no_waf and blog_schema_valid
         if not blog_neg:
             false_positive_regressions += 1
         if blog_pass:
             passed_count += 1
 
-        print(f"\n[4/8] Blog")
+        print(f"\n[4/11] Blog")
         print(f"  Fixture: {blog_file}")
         print(f"  URL: {blog_url}")
         print(f"  Duration: {blog_duration}s")
         print(f"  Expected positive: SF-006")
-        print(f"  Expected negative: SF-007 absent, CR-003/CR-004 absent")
+        print(f"  Expected negative: SF-007 absent, CR-003/CR-004 absent, CR-002 absent")
         print(f"  Detected: {blog_rules}")
         print(f"  Schema: {'PASS' if blog_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if blog_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [5/8] Paywall
+        # [5/11] Paywall
         # -------------------------------------------------------------
         paywall_file = "5_paywall.html"
         ArchetypeRequestHandler.active_fixture = paywall_file
@@ -351,7 +366,7 @@ def run_archetype_matrix() -> int:
         if paywall_pass:
             passed_count += 1
 
-        print(f"\n[5/8] Paywall")
+        print(f"\n[5/11] Paywall")
         print(f"  Fixture: {paywall_file}")
         print(f"  URL: {paywall_url}")
         print(f"  Duration: {paywall_duration}s")
@@ -361,7 +376,7 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if paywall_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [6/8] Hydration / Partial-SSR
+        # [6/11] Hydration / Partial-SSR
         # -------------------------------------------------------------
         hydration_file = "6_hydration.html"
         ArchetypeRequestHandler.active_fixture = hydration_file
@@ -383,7 +398,7 @@ def run_archetype_matrix() -> int:
         if hydration_pass:
             passed_count += 1
 
-        print(f"\n[6/8] Hydration / Partial-SSR")
+        print(f"\n[6/11] Hydration / Partial-SSR")
         print(f"  Fixture: {hydration_file}")
         print(f"  URL: {hydration_url}")
         print(f"  Duration: {hydration_duration}s")
@@ -394,7 +409,7 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if hydration_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [7/8] Benign Cookie-Consent Banner
+        # [7/11] Benign Cookie-Consent Banner
         # -------------------------------------------------------------
         cookie_file = "7_cookie_banner.html"
         ArchetypeRequestHandler.active_fixture = cookie_file
@@ -416,7 +431,7 @@ def run_archetype_matrix() -> int:
         if cookie_pass:
             passed_count += 1
 
-        print(f"\n[7/8] Benign Cookie-Consent Banner")
+        print(f"\n[7/11] Benign Cookie-Consent Banner")
         print(f"  Fixture: {cookie_file}")
         print(f"  URL: {cookie_url}")
         print(f"  Duration: {cookie_duration}s")
@@ -426,7 +441,7 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if cookie_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [8/8] i18n / Multilingual
+        # [8/11] i18n / Multilingual
         # -------------------------------------------------------------
         i18n_file = "8_i18n.html"
         ArchetypeRequestHandler.active_fixture = i18n_file
@@ -448,7 +463,7 @@ def run_archetype_matrix() -> int:
         if i18n_pass:
             passed_count += 1
 
-        print(f"\n[8/8] i18n / Multilingual")
+        print(f"\n[8/11] i18n / Multilingual")
         print(f"  Fixture: {i18n_file}")
         print(f"  URL: {i18n_url}")
         print(f"  Duration: {i18n_duration}s")
@@ -458,7 +473,7 @@ def run_archetype_matrix() -> int:
         print(f"  Result: {'PASS' if i18n_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [9/9] Non-HTML Document (agents.md / text/markdown)
+        # [9/11] Non-HTML Document (agents.md / text/markdown)
         # -------------------------------------------------------------
         agents_file = "agents.md"
         ArchetypeRequestHandler.active_fixture = agents_file
@@ -482,7 +497,7 @@ def run_archetype_matrix() -> int:
         if agents_pass:
             passed_count += 1
 
-        print(f"\n[9/9] Non-HTML Document (agents.md)")
+        print(f"\n[9/11] Non-HTML Document (agents.md)")
         print(f"  Fixture: {agents_file}")
         print(f"  URL: {agents_url}")
         print(f"  Duration: {agents_duration}s")
@@ -490,6 +505,78 @@ def run_archetype_matrix() -> int:
         print(f"  Detected: {agents_rules}")
         print(f"  Schema: {'PASS' if agents_schema_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if agents_pass else 'FAIL'}")
+
+        # -------------------------------------------------------------
+        # [10/11] WAF / Bot-Challenge (10_waf_challenge.html)
+        # -------------------------------------------------------------
+        waf_file = "10_waf_challenge.html"
+        ArchetypeRequestHandler.active_fixture = waf_file
+        waf_url = f"http://127.0.0.1:{port}/{waf_file}"
+        t0 = time.time()
+        report_waf = run_audit(waf_url, max_pages=3)
+        waf_duration = round(time.time() - t0, 2)
+
+        waf_rules = [f.get("local_id") for f in report_waf.get("findings", []) if f.get("local_id")]
+        waf_schema_valid, waf_errs = _verify_report_integrity(report_waf)
+        if not waf_schema_valid:
+            schema_all_passed = False
+
+        waf_crit_finding = any(
+            f.get("local_id") == "CR-002"
+            and f.get("severity") == "critical"
+            and "WAF" in f.get("title", "")
+            for f in report_waf.get("findings", [])
+        )
+        waf_blocked = (
+            report_waf.get("audit_status") == "blocked"
+            and report_waf.get("blocked_reason") == "waf_bot_challenge"
+        )
+        waf_pass = waf_crit_finding and waf_blocked and waf_schema_valid
+        if waf_pass:
+            passed_count += 1
+
+        print(f"\n[10/11] WAF / Bot-Challenge")
+        print(f"  Fixture: {waf_file}")
+        print(f"  URL: {waf_url}")
+        print(f"  Duration: {waf_duration}s")
+        print(f"  Expected: CR-002 (critical WAF), audit_status='blocked' (waf_bot_challenge)")
+        print(f"  Detected: {waf_rules}")
+        print(f"  Audit Status: {report_waf.get('audit_status')} ({report_waf.get('blocked_reason')})")
+        print(f"  Schema: {'PASS' if waf_schema_valid else 'FAIL'}")
+        print(f"  Result: {'PASS' if waf_pass else 'FAIL'}")
+
+        # -------------------------------------------------------------
+        # [11/11] Geolocation-Gate (11_geo_gate.html)
+        # -------------------------------------------------------------
+        geo_file = "11_geo_gate.html"
+        ArchetypeRequestHandler.active_fixture = geo_file
+        geo_url = f"http://127.0.0.1:{port}/{geo_file}"
+        t0 = time.time()
+        report_geo = run_audit(geo_url, max_pages=3)
+        geo_duration = round(time.time() - t0, 2)
+
+        geo_rules = [f.get("local_id") for f in report_geo.get("findings", []) if f.get("local_id")]
+        geo_schema_valid, geo_errs = _verify_report_integrity(report_geo)
+        if not geo_schema_valid:
+            schema_all_passed = False
+
+        geo_finding = any(
+            f.get("local_id") == "CR-005"
+            and "Geolocation" in f.get("title", "")
+            for f in report_geo.get("findings", [])
+        )
+        geo_pass = geo_finding and geo_schema_valid
+        if geo_pass:
+            passed_count += 1
+
+        print(f"\n[11/11] Geolocation-Gate")
+        print(f"  Fixture: {geo_file}")
+        print(f"  URL: {geo_url}")
+        print(f"  Duration: {geo_duration}s")
+        print(f"  Expected: CR-005 (Geolocation or location-selection gate)")
+        print(f"  Detected: {geo_rules}")
+        print(f"  Schema: {'PASS' if geo_schema_valid else 'FAIL'}")
+        print(f"  Result: {'PASS' if geo_pass else 'FAIL'}")
 
     finally:
         httpd.shutdown()

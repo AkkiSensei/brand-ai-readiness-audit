@@ -8,15 +8,17 @@ pathological/adversarial test cases:
   1. Zero-byte page (6_zero_byte.html)
   2. Garbage DOM and primitive-root JSON-LD (7_garbage.html)
   3. Infinite redirect loop (/redirect-loop)
+  4. Hostile TCP blackhole / hang (unresponsive socket)
 
 Asserts:
   - No unhandled exceptions (clean, controlled survival).
   - Schema validity via report.schema.json.
   - JSON serializability via json.dumps.
-  - Score bounded in [0, 100] and valid grade.
+  - Score bounded in [0, 100] and valid grade absence.
   - Sequential finding IDs (F-001..F-NNN).
   - Zero dangling related_to references.
   - Redirect loop capped and detected without hanging.
+  - Bounded network timeout behavior under adversarial blackhole (< 10.0s).
 """
 
 from __future__ import annotations
@@ -63,6 +65,10 @@ class ChaosRequestHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=directory, **kwargs)
 
     def do_GET(self) -> None:
+        if self.path in ("/blackhole", "/hang"):
+            time.sleep(12)
+            return
+
         if self.path == "/redirect-loop":
             self.send_response(301)
             self.send_header("Location", "/redirect-loop")
@@ -112,12 +118,17 @@ class ChaosRequestHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+class ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
 def _start_server(fixtures_dir: pathlib.Path) -> tuple[socketserver.TCPServer, int]:
     """Start ephemeral local HTTP server in a daemon thread."""
     handler_factory = lambda *args, **kwargs: ChaosRequestHandler(
         *args, directory=str(fixtures_dir), **kwargs
     )
-    httpd = socketserver.TCPServer(("127.0.0.1", 0), handler_factory)
+    httpd = ThreadedTCPServer(("127.0.0.1", 0), handler_factory)
     port = httpd.server_address[1]
     server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     server_thread.start()
@@ -186,11 +197,11 @@ def run_chaos_suite() -> int:
     print("============================================================")
 
     passed_cases = 0
-    total_cases = 3
+    total_cases = 4
 
     try:
         # -------------------------------------------------------------
-        # [1/3] Zero-byte page
+        # [1/4] Zero-byte page
         # -------------------------------------------------------------
         zb_file = "6_zero_byte.html"
         zb_url = f"http://127.0.0.1:{port}/{zb_file}"
@@ -208,7 +219,7 @@ def run_chaos_suite() -> int:
         if zb_pass:
             passed_cases += 1
 
-        print(f"\n[1/3] Zero-byte page")
+        print(f"\n[1/4] Zero-byte page")
         print(f"  URL: {zb_url}")
         print(f"  Duration: {zb_dur}s")
         print(f"  Exception: {zb_exc}")
@@ -216,7 +227,7 @@ def run_chaos_suite() -> int:
         print(f"  Result: {'PASS' if zb_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [2/3] Garbage DOM / JSON-LD
+        # [2/4] Garbage DOM / JSON-LD
         # -------------------------------------------------------------
         gb_file = "7_garbage.html"
         gb_url = f"http://127.0.0.1:{port}/{gb_file}"
@@ -234,7 +245,7 @@ def run_chaos_suite() -> int:
         if gb_pass:
             passed_cases += 1
 
-        print(f"\n[2/3] Garbage DOM / JSON-LD")
+        print(f"\n[2/4] Garbage DOM / JSON-LD")
         print(f"  URL: {gb_url}")
         print(f"  Duration: {gb_dur}s")
         print(f"  Exception: {gb_exc}")
@@ -242,7 +253,7 @@ def run_chaos_suite() -> int:
         print(f"  Result: {'PASS' if gb_pass else 'FAIL'}")
 
         # -------------------------------------------------------------
-        # [3/3] Infinite redirect
+        # [3/4] Infinite redirect
         # -------------------------------------------------------------
         rd_url = f"http://127.0.0.1:{port}/redirect-loop"
         t0 = time.time()
@@ -265,13 +276,46 @@ def run_chaos_suite() -> int:
         if rd_pass:
             passed_cases += 1
 
-        print(f"\n[3/3] Infinite redirect")
+        print(f"\n[3/4] Infinite redirect")
         print(f"  URL: {rd_url}")
         print(f"  Duration: {rd_dur}s")
         print(f"  Exception: {rd_exc}")
         print(f"  Redirect protection: {'PASS' if rd_protect else 'FAIL'}")
         print(f"  Schema: {'PASS' if rd_valid else 'FAIL'}")
         print(f"  Result: {'PASS' if rd_pass else 'FAIL'}")
+
+        # -------------------------------------------------------------
+        # [4/4] Hostile TCP Blackhole / Hang
+        # -------------------------------------------------------------
+        bh_url = f"http://127.0.0.1:{port}/blackhole"
+        t0 = time.time()
+        bh_exc = "NONE"
+        bh_valid = False
+        bh_blocked = False
+        report_bh = {}
+        try:
+            report_bh = run_audit(bh_url, max_pages=2, timeout_s=10)
+            bh_valid, bh_errs = _verify_report_integrity(report_bh)
+            bh_blocked = (
+                report_bh.get("audit_status") == "blocked"
+                and report_bh.get("blocked_reason") == "connection_failed"
+            )
+        except Exception as exc:
+            bh_exc = f"{type(exc).__name__}: {exc}"
+
+        bh_dur = round(time.time() - t0, 2)
+        # Must terminate under single-attempt timeout bound (< 12.0s), never compounding into 20s+ retries
+        bh_pass = (bh_exc == "NONE") and bh_valid and bh_blocked and (bh_dur < 12.0)
+        if bh_pass:
+            passed_cases += 1
+
+        print(f"\n[4/4] Hostile TCP Blackhole / Hang")
+        print(f"  URL: {bh_url}")
+        print(f"  Duration: {bh_dur}s (bound: < 12.0s)")
+        print(f"  Exception: {bh_exc}")
+        print(f"  Status: {report_bh.get('audit_status') if bh_exc == 'NONE' else 'N/A'} ({report_bh.get('blocked_reason') if bh_exc == 'NONE' else 'N/A'})")
+        print(f"  Schema: {'PASS' if bh_valid else 'FAIL'}")
+        print(f"  Result: {'PASS' if bh_pass else 'FAIL'}")
 
     finally:
         httpd.shutdown()

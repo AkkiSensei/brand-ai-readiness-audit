@@ -414,11 +414,10 @@ def _build_aborted_report(
     raw_findings = findings or []
     norm_findings = []
     for idx, f in enumerate(raw_findings, 1):
-        nf = dict(f)
+        nf = _normalise_finding(f, "crawl-render-access", target_url)
         nf["id"] = f"F-{idx:03d}"
-        if "category" not in nf:
-            nf["category"] = "discoverability"
         norm_findings.append(nf)
+    norm_findings = _clean_internal_fields(norm_findings)
 
     sev_counts: Counter[str] = Counter()
     for f in norm_findings:

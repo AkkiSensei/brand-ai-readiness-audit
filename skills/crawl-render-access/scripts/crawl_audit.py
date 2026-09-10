@@ -594,15 +594,15 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
         re.IGNORECASE,
     )
     _GEO_PATTERNS = re.compile(
-        r"location[-_]?(modal|picker|gate|prompt|select|dialog|overlay|selector)|"
-        r"pincode[-_]?(modal|picker|gate|prompt|selector|dialog)|"
-        r"delivery[-_]?location|"
+        r"location[-_]?(bar|modal|picker|gate|prompt|select|dialog|overlay|selector|container)|"
+        r"pincode[-_]?(modal|picker|gate|prompt|selector|dialog|container)|"
+        r"delivery[-_]?(location|address|pincode)|"
         r"select[-_]?location|"
         r"geo[-_]?(gate|barrier|block)",
         re.IGNORECASE,
     )
     _GEO_TEXT_PATTERNS = re.compile(
-        r"(?:select|enter|choose|detect)\s+(?:your\s+)?(?:delivery\s+)?(?:location|pincode|address)\s+to\s+(?:see|view|continue|order|browse|unlock)",
+        r"\b(?:select|enter|choose|detect)\s+(?:your\s+)?(?:delivery\s+)?(?:location|pincode|address)\b",
         re.IGNORECASE,
     )
     _OVERLAY_PATTERNS = re.compile(
@@ -637,11 +637,13 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                     break
 
             if not flagged_for_page:
-                # Check text for location prompts
-                text_sample = pr.soup.get_text(separator=" ", strip=True)
-                if _GEO_TEXT_PATTERNS.search(text_sample):
-                    geo_urls.append(url)
-                    flagged_for_page = True
+                # Check text for location prompts in interactive or heading/container elements
+                for el in pr.soup.find_all(["button", "div", "span", "p", "a", "h1", "h2", "h3"]):
+                    txt = el.get_text(strip=True)
+                    if len(txt) < 120 and _GEO_TEXT_PATTERNS.search(txt):
+                        geo_urls.append(url)
+                        flagged_for_page = True
+                        break
 
             if not flagged_for_page:
                 # Check inline styles for full-viewport overlays

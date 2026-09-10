@@ -584,7 +584,9 @@ python tests/test_end_to_end.py
 
 * **AST Syntax Verification**: All Python source and test files pass Python AST syntax parsing with 0 errors.
 * **Claim Corroboration Semantic Test (`test_claim_corroboration.py`)**: Confirms strict semantic separation between `TC-001` (sameAs entity graph), `TC-003` (broken outbound accreditation links verified via HTTP HEAD), and `TC-005` (authority claims lacking outbound verification links), while proving zero false positives on generic commercial phrases ("partner with us", "certification course").
-* **Archetype Matrix Validation (`test_archetypes.py`)**: 9/9 PASS across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML) with zero false-positive regressions.
+* **Archetype Matrix Validation (`test_archetypes.py`)**: 11/11 PASS across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML, WAF / Bot-Challenge, Geolocation-Gate) with zero false-positive regressions.
+* **Adversarial Chaos Suite (`test_chaos.py`)**: 4/4 PASS across pathological conditions (Zero-byte page, Garbage DOM / JSON-LD, Infinite redirect loop, Hostile TCP blackhole / hang).
+* **Adversarial Hardening & Status Contract Suite (`test_adversarial_hardening.py`)**: 8/8 PASS covering audit status transitions (`completed`, `partial`, `blocked`), SSRF abort, connection failure, WAF signature discrimination, and geo-gate detection.
 * **Dry-Run Smoke Test (`dry_run_test.py`)**: All 4 domain runners execute cleanly against live targets without unhandled exceptions.
 * **End-to-End Test (`test_end_to_end.py`)**: The master orchestrator executes against `https://example.com`, parses stdout JSON, validates sequential `F-001..F-NNN` IDs, confirms severity ordering, verifies `related_to` cross-references, validates output against `report.schema.json`, and verifies that malformed test values are rejected.
 
@@ -662,8 +664,50 @@ total_findings: 11 (1 high, 5 medium, 2 low, 3 info)
 | No explicit AI crawler Allow in robots.txt | PA-006 | INFO |
 | Section headings lack fragment IDs | PA-003 | INFO |
 
+### v1.0.2 — Adversarial Hardening & Scoring Governance (2026-09-10)
+
+#### WAF / Bot-Challenge Discrimination & Fixture Integration
+- Added Akamai/Cloudflare challenge page discrimination in `crawl_audit._check_cr002`: Active WAF blocks with challenge headers or page signatures (`errors.edgesuite.net`, `cf-chl-bypass`, `challenge-platform`) are classified as `CR-002` (critical) and transition `audit_status` to `"blocked"` with `blocked_reason="waf_bot_challenge"`.
+- Incorporated `10_waf_challenge.html` into the permanent archetype test matrix (`tests/test_archetypes.py`), verifying positive detection and confirming zero false positives on standard 200 archetypes.
+
+#### Geolocation / Pincode Gate Detection & Live Verification
+- Refined `_GEO_PATTERNS` in `crawl_audit._check_cr005` to identify styled component containers (e.g. `LocationBar__Container`, `delivery-location`, `pincode-picker`) and interactive location prompts.
+- Verified live end-to-end via `run_audit()` against production sites:
+  - `https://www.pizzahut.co.in`: Successfully detected `CR-005` location gate.
+  - `https://blinkit.com`: Successfully detected `CR-005` location gate across 3 pages.
+- Incorporated `11_geo_gate.html` into `tests/test_archetypes.py`, verifying positive detection while confirming zero false positives on benign cookie banners (`7_cookie_banner.html`).
+
+#### Chaos Suite Expansion: Hostile TCP Blackhole
+- Folded the TCP blackhole / hang resilience test into `tests/test_chaos.py` as Case 4 (`/blackhole`).
+- Confirmed urllib3 connection/read retries do not compound: single-attempt timeout terminates cleanly under bounded time (< 12.0s), producing schema-valid output with `audit_status="blocked"` and `blocked_reason="connection_failed"`.
+
+#### Audit Status Consistency & Partial Reachability
+- Unified `audit_status` schema contract to `completed`, `partial`, and `blocked` with accompanying `blocked_reason` enum values (`ssrf_disallowed`, `connection_failed`, `robots_disallowed`, `waf_bot_challenge`, `timeout_budget_exhausted`).
+- Confirmed zero occurrences of legacy `blocked_ssrf` string literals in code.
+- Verified reachability of `audit_status="partial"`: When timeout budget is reached during crawl or between domain executions, completed domains emit findings and downstream stages are cleanly skipped, generating a fully schema-valid partial report.
+
 ---
 
-## 10. License
+## 10. Scoring Governance Policy
+
+### Official Policy: No Synthetic Scores in Core Marketplace Skills
+The core marketplace skills (`audit-orchestrator`, `crawl-render-access`, `structured-fact-extraction`, `trust-entity-corroboration`, `engagement-retention`) strictly adhere to the Adobe University Hackathon Round 3 specification:
+1. **Schema Compliance**: The report schema (`skills/audit-orchestrator/references/report.schema.json`) defines structured findings with objective severities (`critical`, `high`, `medium`, `low`, `info`), category groupings, affected page metrics, and actionable remediations.
+2. **No Invented Scores or Grades**: In accordance with the hackathon requirements, the core engine does NOT calculate synthetic "overall scores" (e.g. 0-100) or letter grades (A-F). Generating arbitrary scores would misrepresent the official evaluation rubric.
+3. **Audit Status**: Every audit report explicitly provides an `audit_status` (`completed`, `partial`, or `blocked`) and optional `blocked_reason` so consuming pipelines understand data completeness.
+
+### Sanctioned Internal Triage Tool (`tools/internal_batch_summary.py`)
+To prevent ad-hoc scripts from introducing unverified scoring logic into batch analyses:
+- An internal triage CLI utility is maintained at `tools/internal_batch_summary.py` **outside** the `skills/` directory and is strictly excluded from hackathon submission packaging.
+- **Purpose**: Operational triage across large batch runs (e.g. 60-site analysis) using transparent penalty weighting (critical: -25, high: -15, medium: -8, low: -3).
+- **Labeling**: Outputs prominent banner: `[INTERNAL TRIAGE ONLY - NOT AN OFFICIAL HACKATHON RUBRIC]`.
+- **Usage**:
+  ```bash
+  python tools/internal_batch_summary.py scratch/*.json
+  ```
+
+---
+
+## 11. License
 
 This project is licensed under the **MIT License**. Created for the **Adobe University Hackathon 2026 — Round 3**.

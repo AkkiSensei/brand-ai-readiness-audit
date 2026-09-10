@@ -82,6 +82,38 @@ def test_h1_normal_working_completed_status():
     assert rep["pages_audited"] >= 1
 
 
+def test_h1_partial_status_reachable():
+    """H1 / R3: When timeout budget is reached before downstream checks finish, audit_status='partial'."""
+    import http.server
+    import socketserver
+
+    class SlowHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(0.4)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<!DOCTYPE html><html><body><h1>Slow Page</h1><p>Substantive text content.</p></body></html>")
+
+        def log_message(self, format, *args):
+            pass
+
+    with socketserver.TCPServer(("127.0.0.1", 0), SlowHandler) as httpd:
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+
+        target = f"http://127.0.0.1:{port}/"
+        # timeout_s=1 allows crawl to complete (~0.4s) but exhausts budget before downstream checks
+        rep = aggregate.run_audit(target, timeout_s=1)
+        httpd.shutdown()
+
+    assert rep["audit_status"] == "partial"
+    assert rep.get("blocked_reason") == "timeout_budget_exhausted"
+    assert rep["pages_audited"] >= 1
+    assert "timeout budget" in rep.get("audit_status_message", "").lower()
+
+
 def test_h2_waf_bot_challenge_detection():
     """H2: 403 with WAF challenge signatures emits CR-002 as critical."""
     waf_html = """<html>
