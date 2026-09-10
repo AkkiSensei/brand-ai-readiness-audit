@@ -1,6 +1,6 @@
 # Brand AI-Readiness Audit Marketplace
 
-> An autonomous, deterministic evaluation marketplace for benchmarking public brand websites against AI search, generative-answer, and citation engine ingest pipelines. Built for the **Adobe University Hackathon 2026 — Round 3**.
+> An autonomous, deterministic evaluation marketplace for benchmarking public brand websites against AI search, generative-answer, and citation engine ingest pipelines. Built for the **Adobe University Hackathon 2026 — Round 3**, the system audits any website across two core pillars—AI Discoverability and On-Site Engagement—and emits a clean, schema-validated JSON report detailing technical defects, corroboration gaps, and proactive AI-readiness recommendations.
 
 ---
 
@@ -115,7 +115,45 @@ The project conforms to the **agentskills.io** modular marketplace standard. The
                              (stdout / JSON)
 ```
 
-### 2.1 Skill Specifications
+### 2.1 Repository Layout & File Inventory
+
+```text
+brand-ai-readiness-audit/
+|-- marketplace.json                  # Top-level manifest defining the 5 modular skills (agentskills.io standard)
+|-- requirements.txt                  # Minimal required third-party dependencies (requests, bs4, lxml, jsonschema, pytest)
+|-- PROJECT_DESCRIPTION.md            # Concise executive summary and project pitch
+|-- CONTEXT.md                        # Complete chronological development history, engineering log, and empirical findings
+|-- README.md                         # Comprehensive technical documentation, architecture specs, and execution guide
+|-- skills/
+|   |-- audit-orchestrator/           # Master entrypoint: coordinates crawl, merges & dedups findings, validates schema
+|   |   |-- SKILL.md                  # Orchestrator skill instructions and schema specifications
+|   |   |-- references/               # report.schema.json and thresholds.json reference configurations
+|   |   `-- scripts/                  # aggregate.py (CLI entrypoint), proactive_engine.py, schema_validate.py
+|   |-- crawl-render-access/          # Transport, robots.txt AI bots, CSR/SSR text blanking, status codes, sitemaps
+|   |   |-- SKILL.md                  # Skill specification for crawler, WAF, and render detection
+|   |   `-- scripts/                  # crawl_audit.py, http_client.py (token-bucket rate limiter, SSRF guard)
+|   |-- structured-fact-extraction/   # Schema.org JSON-LD extraction, trapped facts in images/canvas/PDFs, freshness
+|   |   |-- SKILL.md                  # Skill specification for structured data and media fact extraction
+|   |   `-- scripts/                  # sfe_audit.py
+|   |-- trust-entity-corroboration/   # sameAs entity linkage, NAP consistency, brand disambiguation, claim verification
+|   |   |-- SKILL.md                  # Skill specification for knowledge graph and authority checks
+|   |   `-- scripts/                  # tec_audit.py
+|   `-- engagement-retention/         # On-site UX, visible H1/nav, intrusive overlays/interstitials, responsive viewports
+|       |-- SKILL.md                  # Skill specification for engagement, layout stability, and heading checks
+|       `-- scripts/                  # er_audit.py
+|-- tests/                            # Automated test and verification suite
+|   |-- fixtures/                     # 12 synthetic and adversarial HTML fixtures (SPAs, e-commerce, paywalls, WAF, geo-gates)
+|   |-- test_archetypes.py            # Step 4 Archetype Matrix Validation suite (11/11 PASS)
+|   |-- test_chaos.py                 # Phase 0-4 Adversarial Chaos suite (4/4 PASS: zero-byte, garbage DOM, redirect loop, blackhole)
+|   |-- test_adversarial_hardening.py # Unit tests for WAF discrimination, geo-gate detection, and audit status transitions
+|   |-- test_claim_corroboration.py   # Semantic claim verification tests (TC-003 and TC-005)
+|   |-- dry_run_test.py               # Integration smoke test across all 4 domain runners
+|   `-- test_end_to_end.py            # Master CLI integration and contract verification against example.com
+`-- tools/                            # Non-submission utilities (internal batch triage tool for offline sorting)
+    `-- internal_batch_summary.py     # Internal triage script applying offline penalty weights (excluded from submission)
+```
+
+### 2.2 Skill Specifications
 
 #### 1. `audit-orchestrator` (ENTRYPOINT)
 * **Path**: `skills/audit-orchestrator`
@@ -123,14 +161,14 @@ The project conforms to the **agentskills.io** modular marketplace standard. The
 * **Key Responsibilities**:
   * Initializes the rate-limited `HttpClient` session.
   * Dispatches the initial crawl to `crawl-render-access` and captures the discovered URL frontier and pre-parsed `PageResult` DOM representations.
-  * Detects critical site-wide crawler bans (`CR-001`) and gracefully short-circuits downstream audits to avoid futile network requests.
+  * Detects critical site-wide crawler bans (`CR-001`), WAF bot challenges, or connection failures and gracefully short-circuits downstream audits.
   * Fans out the crawled page results concurrently across `structured-fact-extraction`, `trust-entity-corroboration`, and `engagement-retention` without redundant network re-fetching.
-  * Merges raw findings across all domains and executes deterministic, multi-attribute deduplication.
+  * Merges raw findings across all domains and executes deterministic, multi-attribute deduplication (`_dedup_key`).
   * Sorts findings by severity precedence (`critical > high > medium > low > info`).
   * Assigns gap-free, sequential finding IDs (`F-001`, `F-002`, ..., `F-NNN`).
   * Resolves internal cross-domain relationships (`related_to`) to final stable report IDs.
   * Invokes the `proactive_engine` to inject strategic opportunities (`PA-001` through `PA-006`) with duplicate suppression against existing defect findings.
-  * Computes bounded domain readiness scores, composite score (0–100), and letter grades (`A` through `F`) derived from `thresholds.json`.
+  * Assembles per-skill coverage metrics, crawl budget coverage, and render confidence.
   * Validates the complete output against `report.schema.json` before emitting pure JSON to stdout.
 
 #### 2. `crawl-render-access`
@@ -290,11 +328,11 @@ Under the scoring formulation, proactive `info` findings carry a penalty of $0$,
 
 ---
 
-## 5. Scoring Methodology & Mathematical Formulation
+## 5. Operational Triage Model (Internal Offline Utility)
 
-The readiness scoring engine converts discrete technical findings into an objective, normalized **0–100 Brand AI-Readiness Score** and corresponding letter grade.
-
-All scoring weights, severity deductions, and grade boundaries are loaded dynamically from `skills/audit-orchestrator/references/thresholds.json`.
+> **Important Governance Note**: In strict adherence to the Adobe University Hackathon Round 3 specification, the core marketplace skills (`skills/*`) do **not** emit synthetic 0–100 scores or letter grades in their official output report (`report.schema.json`). Instead, the core engine reports pure, objective technical findings, severity breakdowns, and crawler coverage metrics.
+>
+> The mathematical formulation below is implemented exclusively within the internal operational triage utility (`tools/internal_batch_summary.py`) to rank and prioritize findings when auditing large multi-site batches (e.g. 60-site evaluations) offline.
 
 ### 5.1 Mathematical Formulation
 
@@ -393,8 +431,8 @@ Clone the repository and install dependencies:
 git clone https://github.com/AkkiSensei/brand-ai-readiness-audit.git
 cd brand-ai-readiness-audit
 
-# Install required dependencies
-pip install requests beautifulsoup4 lxml jsonschema
+# Install all verified dependencies via requirements.txt
+python -m pip install -r requirements.txt
 
 # Optional: Install Playwright for headless browser evaluation
 pip install playwright
@@ -403,7 +441,7 @@ playwright install chromium
 
 ### 6.3 Command-Line Interface (CLI)
 
-The audit orchestrator exposes a clean command-line interface via `aggregate.py`:
+The audit orchestrator exposes a clean, standardized command-line interface via `aggregate.py`:
 
 ```bash
 # Basic audit: emit pure JSON report to stdout
@@ -413,7 +451,16 @@ python skills/audit-orchestrator/scripts/aggregate.py https://example.com
 python skills/audit-orchestrator/scripts/aggregate.py https://example.com --max-pages 5
 
 # Export report directly to a file
-python skills/audit-orchestrator/scripts/aggregate.py https://example.com --max-pages 10 --output audit_report.json
+python skills/audit-orchestrator/scripts/aggregate.py https://example.com --max-pages 5 --output report.json
+
+# Pretty-print formatted JSON (PowerShell)
+Get-Content report.json | ConvertFrom-Json | ConvertTo-Json -Depth 10
+
+# Pretty-print formatted JSON (Bash/jq)
+cat report.json | jq .
+
+# Verify schema compliance
+python skills/audit-orchestrator/scripts/schema_validate.py report.json
 ```
 
 ### 6.4 Stdout Purity Contract
@@ -436,42 +483,30 @@ The output conforms strictly to `skills/audit-orchestrator/references/report.sch
 ```json
 {
   "schema_version": "1.0.0",
-  "generated_at": "2026-09-03T16:44:23Z",
+  "generated_at": "2026-09-10T10:24:57Z",
+  "audited_at": "2026-09-10T10:24:57Z",
   "target_url": "https://example.com",
-  "pages_audited": 4,
-  "audit_duration_seconds": 5.02,
+  "site": "https://example.com",
+  "audit_status": "completed",
+  "audit_status_message": "Audit completed successfully.",
+  "pages_audited": 1,
+  "audit_duration_seconds": 5.04,
   "summary": {
-    "total_findings": 9,
+    "total_findings": 7,
     "critical": 0,
-    "high": 4,
+    "high": 2,
     "medium": 3,
     "low": 0,
-    "info": 2
-  },
-  "coverage": {
-    "crawl_render_access": {
-      "pages_checked": 1,
-      "checks_run": 1,
-      "errors": 0
-    },
-    "structured_fact_extraction": {
-      "pages_checked": 1,
-      "checks_run": 1,
-      "errors": 0
-    },
-    "trust_entity_corroboration": {
-      "pages_checked": 1,
-      "checks_run": 2,
-      "errors": 0
-    },
-    "engagement_retention": {
-      "pages_checked": 1,
-      "checks_run": 3,
-      "errors": 0
+    "info": 2,
+    "coverage": {
+      "pages_audited": 1,
+      "pages_in_sitemap": 0,
+      "budget_limited": false
     }
   },
   "findings": [
     {
+      "local_id": "SF-001",
       "id": "F-001",
       "title": "No JSON-LD structured data found on any page",
       "severity": "high",
@@ -484,6 +519,7 @@ The output conforms strictly to `skills/audit-orchestrator/references/report.sch
       "related_to": []
     },
     {
+      "local_id": "TC-001",
       "id": "F-002",
       "title": "No sameAs links in Organization schema",
       "severity": "high",
@@ -498,13 +534,28 @@ The output conforms strictly to `skills/audit-orchestrator/references/report.sch
       ]
     },
     {
-      "id": "F-008",
-      "title": "No RSS or Atom feed detected",
+      "local_id": "ER-001",
+      "id": "F-005",
+      "title": "Pages missing primary navigation",
+      "severity": "medium",
+      "category": "engagement",
+      "evidence": "1 page(s) lack <nav> or recognisable navigation with >= 3 links: https://example.com",
+      "suggested_action": {
+        "summary": "Add semantic <nav> elements with at least 3 internal links for site-wide navigation.",
+        "priority": "medium"
+      },
+      "related_to": [],
+      "confidence": 1.0
+    },
+    {
+      "local_id": "PA-001",
+      "id": "F-007",
+      "title": "No llms.txt file found for LLM-readable site description",
       "severity": "info",
       "category": "proactive",
-      "evidence": "No <link rel='alternate'> with type application/rss+xml or application/atom+xml was found across any crawled page.",
+      "evidence": "Neither /llms.txt nor /llms-full.txt returned a successful response. These files provide a structured site description optimised for large language models.",
       "suggested_action": {
-        "summary": "Publish an RSS or Atom feed for your blog, news, or product updates. Syndication feeds enable AI aggregators and citation engines to track your content freshness automatically.",
+        "summary": "Publish an /llms.txt file at your site root describing your brand, key offerings, and site structure in plain text format optimised for LLM consumption. See llmstxt.org for the specification.",
         "priority": "info"
       },
       "related_to": []
@@ -515,9 +566,58 @@ The output conforms strictly to `skills/audit-orchestrator/references/report.sch
     "Create or link to a Wikidata entity: Wikidata is the primary knowledge base for many AI systems. A verified Wikidata entry with sameAs linking significantly improves entity recognition.",
     "Add contactPoint to Organization schema: ContactPoint structured data helps AI engines surface your customer service details in responses.",
     "Add skip-to-content navigation link: A 'Skip to main content' link improves accessibility and signals good UX practices to AI quality evaluators."
-  ]
+  ],
+  "coverage": {
+    "crawl_render_access": {
+      "pages_checked": 1,
+      "checks_run": 1,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "structured_fact_extraction": {
+      "pages_checked": 1,
+      "checks_run": 1,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "trust_entity_corroboration": {
+      "pages_checked": 1,
+      "checks_run": 2,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "engagement_retention": {
+      "pages_checked": 1,
+      "checks_run": 1,
+      "errors": 0,
+      "render_confidence": "high",
+      "pages_with_low_render_confidence": 0
+    },
+    "pages_with_low_render_confidence": 0,
+    "render_confidence": "high"
+  }
 }
 ```
+
+### 6.6 Top-Level Report Field Definitions
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `site` / `target_url` | `string` | The canonical target URI audited by the engine. |
+| `audited_at` / `generated_at` | `string (ISO 8601)` | Precise UTC timestamp of audit completion. |
+| `audit_status` | `string` | Overall audit outcome: `"completed"`, `"partial"`, or `"blocked"`. |
+| `blocked_reason` | `string` (optional) | Machine-readable explanation when not completed: `ssrf_disallowed`, `connection_failed`, `robots_disallowed`, `waf_bot_challenge`, or `timeout_budget_exhausted`. |
+| `audit_status_message` | `string` | Human-readable explanation of audit status, error causes, or completion state. |
+| `pages_audited` | `integer` | Total count of unique HTML pages successfully crawled and analyzed. |
+| `audit_duration_seconds` | `number` | Total wall-clock execution duration in seconds. |
+| `summary` | `object` | Aggregate findings count by severity (`critical`, `high`, `medium`, `low`, `info`) and crawl budget coverage metrics. |
+| `findings` | `array[object]` | Ordered list of discrete technical findings sorted by severity descending (`critical` to `info`), each containing `id`, `local_id`, `title`, `severity`, `category`, `evidence`, `suggested_action`, `related_to`, and optional `confidence`. |
+| `proactive_recommendations` | `array[string]` | High-level, beyond-the-defect strategic guidance strings for AI readiness. |
+| `coverage` | `object` | Detailed per-skill execution breakdown (`pages_checked`, `checks_run`, `errors`, `notes`), `pages_with_low_render_confidence`, and site-wide `render_confidence` (`high`, `medium`, `low`). |
+
 
 ---
 
@@ -567,11 +667,17 @@ The audit engine is designed to operate safely as a read-only evaluation client 
 The repository includes an automated test suite confirming end-to-end operational integrity:
 
 ```bash
+# Execute unit & regression test suite via pytest (12/12 passing)
+python -m pytest tests/
+
+# Execute archetype matrix validation across all 11 web fixtures (11/11 passing)
+python tests/test_archetypes.py
+
+# Execute adversarial chaos suite across 4 pathological conditions (4/4 passing)
+python tests/test_chaos.py
+
 # Execute targeted claim corroboration semantic tests (TC-003 & TC-005)
 python tests/test_claim_corroboration.py
-
-# Execute archetype matrix validation across all 8 web fixtures
-python tests/test_archetypes.py
 
 # Execute integration smoke test across all 4 domain runners
 python tests/dry_run_test.py
@@ -583,12 +689,13 @@ python tests/test_end_to_end.py
 ### Verified Test Results
 
 * **AST Syntax Verification**: All Python source and test files pass Python AST syntax parsing with 0 errors.
-* **Claim Corroboration Semantic Test (`test_claim_corroboration.py`)**: Confirms strict semantic separation between `TC-001` (sameAs entity graph), `TC-003` (broken outbound accreditation links verified via HTTP HEAD), and `TC-005` (authority claims lacking outbound verification links), while proving zero false positives on generic commercial phrases ("partner with us", "certification course").
-* **Archetype Matrix Validation (`test_archetypes.py`)**: 11/11 PASS across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML, WAF / Bot-Challenge, Geolocation-Gate) with zero false-positive regressions.
-* **Adversarial Chaos Suite (`test_chaos.py`)**: 4/4 PASS across pathological conditions (Zero-byte page, Garbage DOM / JSON-LD, Infinite redirect loop, Hostile TCP blackhole / hang).
-* **Adversarial Hardening & Status Contract Suite (`test_adversarial_hardening.py`)**: 8/8 PASS covering audit status transitions (`completed`, `partial`, `blocked`), SSRF abort, connection failure, WAF signature discrimination, and geo-gate detection.
-* **Dry-Run Smoke Test (`dry_run_test.py`)**: All 4 domain runners execute cleanly against live targets without unhandled exceptions.
-* **End-to-End Test (`test_end_to_end.py`)**: The master orchestrator executes against `https://example.com`, parses stdout JSON, validates sequential `F-001..F-NNN` IDs, confirms severity ordering, verifies `related_to` cross-references, validates output against `report.schema.json`, and verifies that malformed test values are rejected.
+* **Pytest Suite (`python -m pytest tests/`)**: **12/12 PASS** covering unit functions, HTTP client isolation, orchestrator aggregation, and schema compliance.
+* **Archetype Matrix Validation (`test_archetypes.py`)**: **11/11 PASS** across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML, WAF / Bot-Challenge, Geolocation-Gate) with zero false-positive regressions.
+* **Adversarial Chaos Suite (`test_chaos.py`)**: **4/4 PASS** across pathological conditions (Zero-byte page, Garbage DOM / JSON-LD, Infinite redirect loop, Hostile TCP blackhole / hang).
+* **Claim Corroboration Semantic Test (`test_claim_corroboration.py`)**: **4/4 PASS** confirming strict semantic separation between `TC-001` (sameAs entity graph), `TC-003` (broken outbound accreditation links verified via HTTP HEAD), and `TC-005` (authority claims lacking outbound verification links), while proving zero false positives on generic commercial phrases ("partner with us", "certification course").
+* **Dry-Run Smoke Test (`dry_run_test.py`)**: **4/4 PASS** — all 4 domain runners execute cleanly against live targets without unhandled exceptions.
+* **End-to-End Test (`test_end_to_end.py`)**: **PASS** — the master orchestrator executes against `https://example.com`, parses stdout JSON, validates sequential `F-001..F-NNN` IDs, confirms severity ordering, verifies `related_to` cross-references, validates output against `report.schema.json`, and verifies that malformed test values are rejected.
+* **Determinism Guarantee**: **100% Deterministic Output** — given identical crawl input, the engine generates identical findings and severity tallies on every run. All internal link sampling (`ER-004`), sitemap traversals, and finding collections use deterministic sorting without random sampling or arbitrary dictionary iteration.
 
 ---
 
@@ -708,6 +815,34 @@ To prevent ad-hoc scripts from introducing unverified scoring logic into batch a
 
 ---
 
-## 11. License
+## 11. Known Limitations & Areas for Future Work
+
+While the audit engine is extensively hardened against real-world production site anomalies, several known boundaries and intentional design trade-offs apply to its current release:
+
+1. **Akamai / Cloudflare TLS Fingerprint Tarpitting**:
+   - *Behavior*: Advanced enterprise CDN bot defenses (e.g. Akamai EdgeGrid protecting `gucci.com`) drop TCP connections during TLS negotiation loops when detecting non-browser client fingerprints before HTTP headers can even be returned.
+   - *Current Handling*: The orchestrator enforces socket timeouts and bounded budget limits, cleanly aborting with `audit_status="blocked"` and `blocked_reason="connection_failed"`.
+   - *Future Work*: Integrate residential proxy cycling or modern HTTP/2/3 fingerprint mimicry (e.g., `curl_cffi` / TLS Client Hello emulation).
+
+2. **Headless JavaScript Rendering is Optional**:
+   - *Behavior*: In standard lightweight CLI runs (`requests` + `BeautifulSoup`), client-rendered content (React/Angular/Vue CSR) is evaluated via text-blanking heuristics (`CR-003`, `CR-004`).
+   - *Current Handling*: High/critical blanking warnings accurately identify that search crawlers receive an empty HTML shell.
+   - *Future Work*: Make headless browser execution (`Playwright`) auto-launch whenever severe CSR blanking is detected, extracting dynamic client-injected JSON-LD before fallback.
+
+3. **Egress-IP-Dependent Geolocation**:
+   - *Behavior*: Geolocation-gate detection (`CR-005`) evaluates how the site behaves from the audit host's IP address. If an e-commerce site requires a localized pincode/zipcode for delivery (e.g. `blinkit.com`, `pizzahut.co.in`), it is detected and flagged. However, regional CDN variations across different continents are not multi-probed in a single audit.
+   - *Future Work*: Add multi-region edge testing via distributed egress nodes.
+
+4. **Single-Hop Outbound Accreditation Corroboration**:
+   - *Behavior*: `trust-entity-corroboration` validates on-page claims by issuing single-hop rate-limited `HEAD` requests to verify outbound target HTTP status (`TC-003`). It does not crawl or deep-inspect the external authority partner's website.
+   - *Future Work*: Implement bidirectional partner verification (crawling the authority site to verify reciprocal backlink or mention).
+
+5. **Read-Only Non-Interactive Crawling**:
+   - *Behavior*: The crawler never clicks interactive elements, submits forms, or interacts with shopping carts, adhering strictly to read-only safety.
+   - *Future Work*: Simulated user journey auditing for authenticated user portals.
+
+---
+
+## 12. License
 
 This project is licensed under the **MIT License**. Created for the **Adobe University Hackathon 2026 — Round 3**.
