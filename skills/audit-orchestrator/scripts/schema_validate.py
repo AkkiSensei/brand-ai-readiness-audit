@@ -420,3 +420,34 @@ def _check_type(
         errors.append(
             f"'{key}' must be {expected}, got {type(data[key]).__name__}"
         )
+
+
+def _cli() -> None:
+    import sys
+    from pathlib import Path
+    import json
+    if len(sys.argv) < 2:
+        print("Usage: python schema_validate.py <report.json>", file=sys.stderr)
+        sys.exit(1)
+    report_file = Path(sys.argv[1])
+    if not report_file.exists():
+        print(f"Error: file not found: {report_file}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = json.loads(report_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"Error parsing JSON: {exc}", file=sys.stderr)
+        sys.exit(1)
+    valid, errors = validate_report(data)
+    if valid:
+        print(f"VALID: '{report_file.name}' matches report.schema.json successfully.")
+        sys.exit(0)
+    else:
+        print(f"INVALID: '{report_file.name}' has {len(errors)} validation error(s):", file=sys.stderr)
+        for err in errors:
+            print(f"  - {err}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    _cli()

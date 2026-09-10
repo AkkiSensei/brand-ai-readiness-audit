@@ -182,9 +182,10 @@ def _dedup_key(finding: dict) -> str:
         finding.get("category", ""),
         finding.get("severity", ""),
         finding.get("_local_id", ""),
-        finding.get("title", "").lower().strip()[:80],
+        finding.get("title", "").lower().strip()[:120],
     ]
     return "|".join(parts)
+
 
 
 def _deduplicate(findings: list[dict]) -> list[dict]:

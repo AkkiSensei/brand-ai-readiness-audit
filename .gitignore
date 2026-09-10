@@ -64,3 +64,5 @@ coverage.xml
 .ipynb_checkpoints/
 
 scratch/
+*_report.json
+*.report.json
