@@ -48,6 +48,7 @@ _TOP_LEVEL_ALLOWED = {
     "target_url",
     "site",
     "audit_status",
+    "blocked_reason",
     "audit_status_message",
     "pages_audited",
     "audit_duration_seconds",
@@ -188,6 +189,12 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     _check_type(report_data, "target_url", str, errors)
     _check_type(report_data, "site", str, errors)
     _check_type(report_data, "audit_status", str, errors, optional=True)
+    if "audit_status" in report_data and report_data["audit_status"] is not None:
+        if report_data["audit_status"] not in ("completed", "partial", "blocked"):
+            errors.append(
+                f"audit_status must be 'completed', 'partial', or 'blocked', got '{report_data['audit_status']}'"
+            )
+    _check_type(report_data, "blocked_reason", str, errors, optional=True)
     _check_type(report_data, "audit_status_message", str, errors, optional=True)
     _check_type(report_data, "pages_audited", int, errors, optional=True)
     _check_type(report_data, "audit_duration_seconds", (int, float), errors, optional=True)

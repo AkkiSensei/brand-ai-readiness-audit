@@ -406,9 +406,24 @@ def _build_aborted_report(
     status: str,
     message: str,
     elapsed: float,
+    reason: Optional[str] = None,
+    findings: Optional[list[dict]] = None,
 ) -> dict[str, Any]:
-    """Build a compliant zero-finding report for blocked or unreachable targets."""
+    """Build a compliant report for blocked or unreachable targets."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    raw_findings = findings or []
+    norm_findings = []
+    for idx, f in enumerate(raw_findings, 1):
+        nf = dict(f)
+        nf["id"] = f"F-{idx:03d}"
+        if "category" not in nf:
+            nf["category"] = "discoverability"
+        norm_findings.append(nf)
+
+    sev_counts: Counter[str] = Counter()
+    for f in norm_findings:
+        sev_counts[f.get("severity", "info")] += 1
+
     report: dict[str, Any] = {
         "schema_version": "1.0.0",
         "generated_at": now_iso,
@@ -420,24 +435,24 @@ def _build_aborted_report(
         "pages_audited": 0,
         "audit_duration_seconds": round(elapsed, 2),
         "summary": {
-            "total_findings": 0,
-            "critical": 0,
-            "high": 0,
-            "medium": 0,
-            "low": 0,
-            "info": 0,
+            "total_findings": len(norm_findings),
+            "critical": sev_counts["critical"],
+            "high": sev_counts["high"],
+            "medium": sev_counts["medium"],
+            "low": sev_counts["low"],
+            "info": sev_counts["info"],
             "coverage": {
                 "pages_audited": 0,
                 "pages_in_sitemap": None,
                 "budget_limited": False,
             },
         },
-        "findings": [],
+        "findings": norm_findings,
         "proactive_recommendations": [],
         "coverage": {
             "crawl_render_access": {
                 "pages_checked": 0,
-                "checks_run": 0,
+                "checks_run": 1 if norm_findings else 0,
                 "errors": 1,
                 "notes": message,
                 "render_confidence": "high",
@@ -471,6 +486,9 @@ def _build_aborted_report(
             "render_confidence": "high",
         },
     }
+    if reason:
+        report["blocked_reason"] = reason
+
     return report
 
 
@@ -501,9 +519,10 @@ def run_audit(
             elapsed = time.monotonic() - t_start
             return _build_aborted_report(
                 target_url,
-                "blocked_ssrf",
+                "blocked",
                 f"Audit could not complete: target URL is blocked by SSRF protection ({reason}). Content was not inspected.",
                 elapsed,
+                reason="ssrf_disallowed",
             )
 
     client = HttpClient(allow_private_ips=is_local_target)
@@ -552,12 +571,60 @@ def _run_pipeline(
     page_results: dict[str, PageResult] = crawl_result.get("page_results", {})
 
     # ==============================================================
-    # STEP 2: Site-wide block short-circuit
+    # STEP 2: Early abort on blocked/failed crawl
+    # ==============================================================
+    pages_analyzed = crawl_result.get("pages_analyzed", 0)
+    if pages_analyzed == 0:
+        elapsed = time.monotonic() - t_start
+
+        # 1. Total connection failure / host refused / DNS failure / timeout
+        if not page_results or all(pr.status_code is None for pr in page_results.values()):
+            errors_list = [pr.error for pr in page_results.values() if pr.error]
+            if not errors_list:
+                errors_list = crawl_result.get("errors", [])
+            err_msg = "; ".join(errors_list[:3]) or "Target connection failed."
+            return _build_aborted_report(
+                target_url,
+                status="blocked",
+                message=f"Audit could not complete: connection to target failed ({err_msg}). No content could be inspected.",
+                elapsed=elapsed,
+                reason="connection_failed",
+            )
+
+        # 2. Site-wide robots disallow
+        if any(pr.error and "robots.txt disallows" in pr.error for pr in page_results.values()):
+            robots_findings = [f for f in crawl_result.get("findings", []) if f.get("local_id") == "CR-001"]
+            return _build_aborted_report(
+                target_url,
+                status="blocked",
+                message="Audit could not complete: robots.txt disallows crawler access to root. Content was not inspected.",
+                elapsed=elapsed,
+                reason="robots_disallowed",
+                findings=robots_findings,
+            )
+
+        # 3. All attempted pages returned active WAF / anti-bot challenge
+        waf_findings = [
+            f for f in crawl_result.get("findings", [])
+            if f.get("local_id") == "CR-002" and f.get("severity") == "critical"
+        ]
+        if waf_findings and all(pr.status_code in (403, 429, 503, 202) for pr in page_results.values()):
+            return _build_aborted_report(
+                target_url,
+                status="blocked",
+                message="Audit blocked: target site presented active WAF / anti-bot challenge on all attempted requests.",
+                elapsed=elapsed,
+                reason="waf_bot_challenge",
+                findings=waf_findings,
+            )
+
+    # ==============================================================
+    # STEP 3: Site-wide block short-circuit
     # ==============================================================
     site_blocked = _is_site_wide_block(crawl_result)
 
     # ==============================================================
-    # STEP 3: Downstream domain audits
+    # STEP 4: Downstream domain audits
     # ==============================================================
     downstream = [
         ("structured-fact-extraction", sfe_audit),
@@ -717,14 +784,28 @@ def _run_pipeline(
     # STEP 15: Assemble report
     # ==============================================================
     elapsed = time.monotonic() - t_start
+
+    timeout_skipped = any(
+        res and any("timeout budget" in str(e).lower() for e in res.get("errors", []))
+        for res in domain_results.values()
+    )
+    if timeout_skipped:
+        overall_status = "partial"
+        blocked_reason = "timeout_budget_exhausted"
+        status_msg = "Audit completed partially: timeout budget was reached before all domain checks finished."
+    else:
+        overall_status = "completed"
+        blocked_reason = None
+        status_msg = "Audit completed successfully."
+
     report: dict[str, Any] = {
         "schema_version": "1.0.0",
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "audited_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "target_url": target_url,
         "site": target_url,
-        "audit_status": "completed",
-        "audit_status_message": "Audit completed successfully.",
+        "audit_status": overall_status,
+        "audit_status_message": status_msg,
         "pages_audited": (
             (domain_results.get("crawl-render-access") or {}).get("pages_analyzed")
             or len(frontier)
@@ -735,6 +816,8 @@ def _run_pipeline(
         "proactive_recommendations": proactive_strings,
         "coverage": coverage,
     }
+    if blocked_reason is not None:
+        report["blocked_reason"] = blocked_reason
 
     # ==============================================================
     # STEP 16: Schema validation

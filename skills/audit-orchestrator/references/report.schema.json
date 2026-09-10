@@ -43,8 +43,12 @@
     },
     "audit_status": {
       "type": "string",
-      "enum": ["completed", "blocked_ssrf", "unreachable", "failed"],
-      "description": "Execution status indicating whether the audit completed or was aborted for safety or network reasons."
+      "enum": ["completed", "partial", "blocked"],
+      "description": "Execution status indicating whether the audit completed, completed partially, or was blocked for safety, network, or policy reasons."
+    },
+    "blocked_reason": {
+      "type": "string",
+      "description": "Short explanation or code if audit_status is blocked or partial (e.g. ssrf_disallowed, connection_failed, robots_disallowed, waf_bot_challenge, timeout_exhausted)."
     },
     "audit_status_message": {
       "type": "string",

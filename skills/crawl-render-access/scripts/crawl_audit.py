@@ -355,16 +355,59 @@ def _check_cr001(target_url: str, client: HttpClient) -> list[dict]:
     return findings
 
 
+def _is_waf_challenge(pr: PageResult) -> tuple[bool, str]:
+    """Determine if a PageResult corresponds to a WAF / anti-bot challenge response."""
+    if pr.status_code not in (403, 429, 503, 202):
+        return False, ""
+
+    headers = {k.lower(): str(v).lower() for k, v in pr.response_headers.items()}
+    html = (pr.html or "").lower()
+
+    # 1. Header indicators
+    if "cf-ray" in headers or "cf-mitigated" in headers or "cf-chl-bypass" in headers:
+        return True, "Cloudflare WAF / bot challenge (cf-ray/cf-mitigated)"
+    if "x-rate-limit" in headers and "signalnonbrowseruseragent" in headers["x-rate-limit"]:
+        return True, "CloudFront automated bot detection (SignalNonBrowserUserAgent)"
+    if any(k.startswith("akamai-") for k in headers):
+        return True, "Akamai EdgeSuite / Bot Manager (akamai header)"
+    if "set-cookie" in headers and any(c in headers["set-cookie"] for c in ("bm_s=", "_abck=", "bm_sz=")):
+        return True, "Akamai Bot Manager (bm_s/_abck cookie)"
+    if "x-datadome" in headers or "datadome" in headers.get("server", ""):
+        return True, "DataDome bot protection"
+    if any(k.startswith("x-px-") for k in headers) or "px-captcha" in html:
+        return True, "PerimeterX / HUMAN Security bot challenge"
+
+    # 2. HTML / Title indicators
+    if "edgesuite.net" in html or ("access denied" in html and "reference #" in html):
+        return True, "Akamai EdgeSuite access denied challenge"
+    if "attention required! | cloudflare" in html or "cf-challenge" in html or "challenges.cloudflare.com" in html:
+        return True, "Cloudflare Turnstile / challenge page"
+    if "just a moment..." in html or "checking your browser before accessing" in html:
+        return True, "Cloudflare JavaScript anti-bot challenge"
+    if "are you a robot?" in html or "captcha.px-cloud.net" in html:
+        return True, "PerimeterX bot verification page"
+    if "aws waf" in html or "x-amzn-waf-action" in headers:
+        return True, "AWS WAF block/challenge"
+    if "in order to continue, we need to verify that you're not a robot" in html:
+        return True, "Anti-bot verification page"
+
+    return False, ""
+
+
 def _check_cr002(
     page_results: dict[str, PageResult],
 ) -> list[dict]:
-    """CR-002 (high): Non-200/301 status codes or excessive redirect chains."""
+    """CR-002: WAF/bot challenge blocking (critical) or non-200/301 status (high)."""
     findings: list[dict] = []
     try:
+        waf_urls: list[str] = []
         bad_codes: list[str] = []
         long_redirects: list[str] = []
         for url, pr in page_results.items():
-            if pr.status_code is not None and pr.status_code not in (200, 301):
+            is_waf, signature = _is_waf_challenge(pr)
+            if is_waf:
+                waf_urls.append(f"{url} ({pr.status_code}: {signature})")
+            elif pr.status_code is not None and pr.status_code not in (200, 301):
                 bad_codes.append(f"{url} -> {pr.status_code}")
             elif pr.status_code is None and pr.error:
                 bad_codes.append(f"{url} -> {pr.error[:80]}")
@@ -373,6 +416,21 @@ def _check_cr002(
                     f"{url} ({len(pr.redirect_chain)} hops)" if pr.redirect_chain else f"{url} (redirect loop)"
                 )
         total_pages = len(page_results)
+
+        if waf_urls:
+            findings.append(_finding(
+                "CR-002",
+                "WAF / anti-bot challenge blocking crawler access",
+                "critical",
+                f"{len(waf_urls)} URL(s) blocked by active WAF or anti-bot challenge: "
+                + "; ".join(waf_urls[:5])
+                + ("..." if len(waf_urls) > 5 else ""),
+                "Configure edge WAF and bot-defense rules to permit legitimate AI crawler "
+                "user-agents or IPs, or provide dedicated machine-readable sitemaps/APIs.",
+                pages_affected=len(waf_urls),
+                pages_checked=total_pages,
+            ))
+
         if bad_codes:
             findings.append(_finding(
                 "CR-002",
@@ -387,6 +445,7 @@ def _check_cr002(
                 pages_affected=len(bad_codes),
                 pages_checked=total_pages,
             ))
+
         if long_redirects:
             findings.append(_finding(
                 "CR-002",
@@ -527,11 +586,23 @@ def _check_cr003_cr004(
 
 
 def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
-    """CR-005 (high): Paywall or login overlay blocking content."""
+    """CR-005 (high): Paywall, login wall, or geolocation gating overlay."""
     findings: list[dict] = []
     _PAYWALL_PATTERNS = re.compile(
         r"paywall|login[-_]?wall|subscribe[-_]?wall|gated[-_]?content|"
         r"premium[-_]?content|sign[-_]?in[-_]?overlay|metered|regwall",
+        re.IGNORECASE,
+    )
+    _GEO_PATTERNS = re.compile(
+        r"location[-_]?(modal|picker|gate|prompt|select|dialog|overlay|selector)|"
+        r"pincode[-_]?(modal|picker|gate|prompt|selector|dialog)|"
+        r"delivery[-_]?location|"
+        r"select[-_]?location|"
+        r"geo[-_]?(gate|barrier|block)",
+        re.IGNORECASE,
+    )
+    _GEO_TEXT_PATTERNS = re.compile(
+        r"(?:select|enter|choose|detect)\s+(?:your\s+)?(?:delivery\s+)?(?:location|pincode|address)\s+to\s+(?:see|view|continue|order|browse|unlock)",
         re.IGNORECASE,
     )
     _OVERLAY_PATTERNS = re.compile(
@@ -541,45 +612,91 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
     )
 
     try:
-        flagged: list[str] = []
+        geo_urls: list[str] = []
+        paywall_urls: list[str] = []
+        overlay_urls: list[str] = []
+
         for url, pr in page_results.items():
             if pr.soup is None:
                 continue
-            html_str = str(pr.soup)
 
-            # Check class/id names for paywall patterns
+            flagged_for_page = False
+
+            # Check class/id names for patterns
             for el in pr.soup.find_all(True):
                 classes = " ".join(el.get("class", []))
                 el_id = el.get("id", "")
-                if _PAYWALL_PATTERNS.search(classes) or _PAYWALL_PATTERNS.search(el_id):
-                    flagged.append(url)
+                comb = f"{classes} {el_id}"
+                if _GEO_PATTERNS.search(comb):
+                    geo_urls.append(url)
+                    flagged_for_page = True
+                    break
+                elif _PAYWALL_PATTERNS.search(comb):
+                    paywall_urls.append(url)
+                    flagged_for_page = True
                     break
 
-            # Check inline styles for full-viewport overlays
-            for el in pr.soup.find_all(style=True):
-                style = el.get("style", "")
-                if _OVERLAY_PATTERNS.search(style):
-                    z_match = re.search(r"z-index\s*:\s*(\d+)", style)
-                    if z_match and int(z_match.group(1)) > 100:
-                        if url not in flagged:
-                            flagged.append(url)
-                        break
+            if not flagged_for_page:
+                # Check text for location prompts
+                text_sample = pr.soup.get_text(separator=" ", strip=True)
+                if _GEO_TEXT_PATTERNS.search(text_sample):
+                    geo_urls.append(url)
+                    flagged_for_page = True
 
-        if flagged:
+            if not flagged_for_page:
+                # Check inline styles for full-viewport overlays
+                for el in pr.soup.find_all(style=True):
+                    style = el.get("style", "")
+                    if _OVERLAY_PATTERNS.search(style):
+                        z_match = re.search(r"z-index\s*:\s*(\d+)", style)
+                        if z_match and int(z_match.group(1)) > 100:
+                            overlay_urls.append(url)
+                            break
+
+        total_pages = len(page_results)
+
+        if geo_urls:
+            findings.append(_finding(
+                "CR-005",
+                "Geolocation or location-selection gate blocking catalog content",
+                "high",
+                f"{len(geo_urls)} page(s) enforce geolocation or pincode selection before catalog content renders: "
+                + "; ".join(geo_urls[:5]),
+                "Ensure autonomous crawlers can access a default, national, or location-agnostic catalog "
+                "without requiring interactive location/pincode selection.",
+                related=["CR-003"],
+                pages_affected=len(geo_urls),
+                pages_checked=total_pages,
+            ))
+
+        if paywall_urls:
             findings.append(_finding(
                 "CR-005",
                 "Paywall or login overlay detected blocking content",
                 "high",
-                f"{len(flagged)} page(s) have paywall/login overlay patterns: "
-                + "; ".join(flagged[:5]),
-                "Ensure that AI crawlers can access the full page content "
-                "without encountering login walls. Consider implementing "
-                "metered access with first-click-free for crawler user-agents, "
+                f"{len(paywall_urls)} page(s) have paywall/login overlay patterns: "
+                + "; ".join(paywall_urls[:5]),
+                "Ensure that AI crawlers can access the full page content without encountering login walls. "
+                "Consider implementing metered access with first-click-free for crawler user-agents, "
                 "or use structured data (CreativeWork with isAccessibleForFree).",
                 related=["CR-003"],
-                pages_affected=len(flagged),
-                pages_checked=len(page_results),
+                pages_affected=len(paywall_urls),
+                pages_checked=total_pages,
             ))
+
+        if overlay_urls:
+            findings.append(_finding(
+                "CR-005",
+                "Full-viewport overlay detected blocking content",
+                "high",
+                f"{len(overlay_urls)} page(s) have full-viewport overlay styling: "
+                + "; ".join(overlay_urls[:5]),
+                "Ensure that modal overlays do not obstruct primary content on initial page load.",
+                related=["CR-003"],
+                pages_affected=len(overlay_urls),
+                pages_checked=total_pages,
+            ))
+
     except Exception as exc:
         logger.debug("CR-005 error: %s", exc)
     return findings

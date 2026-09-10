@@ -437,10 +437,10 @@ class HttpClient:
         session = requests.Session()
         session.headers.update({"User-Agent": USER_AGENT, **DEFAULT_HEADERS})
         retry_strategy = Retry(
-            total=MAX_RETRIES,
-            backoff_factor=RETRY_BACKOFF,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "HEAD"],
+            total=0,
+            connect=False,
+            read=False,
+            status=0,
             raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
