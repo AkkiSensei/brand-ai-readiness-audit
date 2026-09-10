@@ -133,6 +133,7 @@ A JSON document conforming to `references/report.schema.json` containing:
 - `audit_duration_seconds` — Wall-clock execution time.
 - `summary` — Severity counts and crawl budget coverage metadata.
 - `findings` — Deduplicated, severity-sorted findings with sequential IDs (`F-001`..`F-NNN`), category (`discoverability`, `engagement`, `proactive`), evidence string/object, structured `suggested_action` (`{summary, priority}`), and `related_to` cross-references.
+  - **`confidence`** (optional float, 0.0–1.0): When present, equals `pages_affected / pages_checked` — the proportion of audited pages exhibiting this finding. Set only on findings that carry both `pages_affected` and `pages_checked` in the domain output (primarily CR-002, CR-003, CR-004, CR-005, CR-008). A value of `1.0` means every crawled page was affected; `0.5` means half. This is a page-scope affectedness ratio, not a detection confidence score. Findings without page scope (e.g. robots.txt checks, sitemap-level checks) do not carry this field.
 - `proactive_recommendations` — Strategic advice strings from domain runners.
 - `coverage` — Per-domain pages_checked, checks_run, and error counts.
 
