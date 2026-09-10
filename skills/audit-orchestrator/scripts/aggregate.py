@@ -52,7 +52,7 @@ for p in (_HTTP_SCRIPTS, _SFE_SCRIPTS, _TEC_SCRIPTS, _ER_SCRIPTS, _ORCH_SCRIPTS)
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-from http_client import HttpClient, PageResult  # type: ignore[import]
+from http_client import HttpClient, PageResult, is_ssrf_disallowed  # type: ignore[import]
 import crawl_audit  # type: ignore[import]
 import sfe_audit  # type: ignore[import]
 import tec_audit  # type: ignore[import]
@@ -398,6 +398,83 @@ def _is_site_wide_block(crawl_result: dict) -> bool:
 
 
 # ===================================================================
+# ABORTED REPORT BUILDER (SSRF, UNREACHABLE)
+# ===================================================================
+
+def _build_aborted_report(
+    target_url: str,
+    status: str,
+    message: str,
+    elapsed: float,
+) -> dict[str, Any]:
+    """Build a compliant zero-finding report for blocked or unreachable targets."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    report: dict[str, Any] = {
+        "schema_version": "1.0.0",
+        "generated_at": now_iso,
+        "audited_at": now_iso,
+        "target_url": target_url,
+        "site": target_url,
+        "audit_status": status,
+        "audit_status_message": message,
+        "pages_audited": 0,
+        "audit_duration_seconds": round(elapsed, 2),
+        "summary": {
+            "total_findings": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "info": 0,
+            "coverage": {
+                "pages_audited": 0,
+                "pages_in_sitemap": None,
+                "budget_limited": False,
+            },
+        },
+        "findings": [],
+        "proactive_recommendations": [],
+        "coverage": {
+            "crawl_render_access": {
+                "pages_checked": 0,
+                "checks_run": 0,
+                "errors": 1,
+                "notes": message,
+                "render_confidence": "high",
+                "pages_with_low_render_confidence": 0,
+            },
+            "structured_fact_extraction": {
+                "pages_checked": 0,
+                "checks_run": 0,
+                "errors": 0,
+                "notes": "Skipped: audit aborted",
+                "render_confidence": "high",
+                "pages_with_low_render_confidence": 0,
+            },
+            "trust_entity_corroboration": {
+                "pages_checked": 0,
+                "checks_run": 0,
+                "errors": 0,
+                "notes": "Skipped: audit aborted",
+                "render_confidence": "high",
+                "pages_with_low_render_confidence": 0,
+            },
+            "engagement_retention": {
+                "pages_checked": 0,
+                "checks_run": 0,
+                "errors": 0,
+                "notes": "Skipped: audit aborted",
+                "render_confidence": "high",
+                "pages_with_low_render_confidence": 0,
+            },
+            "pages_with_low_render_confidence": 0,
+            "render_confidence": "high",
+        },
+    }
+    return report
+
+
+# ===================================================================
 # MAIN ENTRY POINT
 # ===================================================================
 
@@ -416,6 +493,19 @@ def run_audit(
     # --- Initialise HTTP client ---
     target_host = urllib.parse.urlparse(target_url).hostname or ""
     is_local_target = target_host in ("127.0.0.1", "localhost", "::1")
+
+    # Fast SSRF abort for disallowed targets
+    if not is_local_target:
+        disallowed, reason = is_ssrf_disallowed(target_host)
+        if disallowed:
+            elapsed = time.monotonic() - t_start
+            return _build_aborted_report(
+                target_url,
+                "blocked_ssrf",
+                f"Audit could not complete: target URL is blocked by SSRF protection ({reason}). Content was not inspected.",
+                elapsed,
+            )
+
     client = HttpClient(allow_private_ips=is_local_target)
 
     try:
@@ -445,7 +535,7 @@ def _run_pipeline(
     # ==============================================================
     try:
         crawl_result = crawl_audit.run_audit(
-            target_url, client, max_pages=max_pages,
+            target_url, client, max_pages=max_pages, timeout_s=timeout_s, t_start=t_start,
         )
         domain_results["crawl-render-access"] = crawl_result
     except Exception as exc:
@@ -506,6 +596,8 @@ def _run_pipeline(
                 client,
                 crawl_frontier=frontier,
                 page_results=page_results,
+                timeout_s=timeout_s,
+                t_start=t_start,
             )
             domain_results[domain_name] = result
         except Exception as exc:
@@ -631,6 +723,8 @@ def _run_pipeline(
         "audited_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "target_url": target_url,
         "site": target_url,
+        "audit_status": "completed",
+        "audit_status_message": "Audit completed successfully.",
         "pages_audited": (
             (domain_results.get("crawl-render-access") or {}).get("pages_analyzed")
             or len(frontier)

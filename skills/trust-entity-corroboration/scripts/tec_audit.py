@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import sys
+import time
 import urllib.parse
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
@@ -513,6 +514,8 @@ def _check_tc003(
     frontier: list[str],
     page_results: dict[str, PageResult],
     http_client: HttpClient,
+    t_start: float | None = None,
+    timeout_s: float | None = None,
 ) -> list[dict]:
     """TC-003 (high): Claimed external partner or accreditation links broken.
 
@@ -541,6 +544,9 @@ def _check_tc003(
         affected_pages: set[str] = set()
 
         for target_url, src_page in unique_urls[:MAX_CLAIM_VERIFICATION_URLS]:
+            if t_start is not None and timeout_s is not None:
+                if time.monotonic() - t_start >= timeout_s:
+                    break
             try:
                 head = http_client.head(target_url)
                 is_walled_garden = any(
@@ -620,9 +626,11 @@ def _check_tc003_tc005(
     frontier: list[str],
     page_results: dict[str, PageResult],
     http_client: HttpClient,
+    t_start: float | None = None,
+    timeout_s: float | None = None,
 ) -> list[dict]:
     """Dispatch to distinct TC-003 and TC-005 claim checks."""
-    return _check_tc003(frontier, page_results, http_client) + _check_tc005(frontier, page_results)
+    return _check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s) + _check_tc005(frontier, page_results)
 
 
 def _check_tc004_tc006(
@@ -816,12 +824,15 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
 
+    t_start: float | None = kwargs.get("t_start")
+    timeout_s: float | None = kwargs.get("timeout_s")
+
     errors: list[str] = []
     findings: list[dict] = []
 
     findings.extend(_check_tc001(frontier, page_results, http_client))
     findings.extend(_check_tc002(frontier, page_results))
-    findings.extend(_check_tc003(frontier, page_results, http_client))
+    findings.extend(_check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s))
     findings.extend(_check_tc005(frontier, page_results))
     findings.extend(_check_tc004_tc006(frontier, page_results))
 

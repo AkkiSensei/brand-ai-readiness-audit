@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any, Optional
@@ -487,6 +488,8 @@ def _check_er004(
     page_results: dict[str, PageResult],
     http_client: HttpClient,
     root_url: str,
+    t_start: float | None = None,
+    timeout_s: float | None = None,
 ) -> list[dict]:
     """ER-004 (medium/high): Broken internal link ratio."""
     findings: list[dict] = []
@@ -520,6 +523,8 @@ def _check_er004(
 
         broken: list[str] = []
         for link in sample:
+            if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
+                break
             # Check if we already have this result
             pr = page_results.get(link)
             if pr:
@@ -888,10 +893,13 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     errors: list[str] = []
     findings: list[dict] = []
 
+    timeout_s = kwargs.get("timeout_s", None)
+    t_start = kwargs.get("t_start", None)
+
     findings.extend(_check_er001(frontier, page_results))
     findings.extend(_check_er002(frontier, page_results, target_url))
     findings.extend(_check_er003(frontier, page_results))
-    findings.extend(_check_er004(frontier, page_results, http_client, target_url))
+    findings.extend(_check_er004(frontier, page_results, http_client, target_url, t_start=t_start, timeout_s=timeout_s))
     findings.extend(_check_er005(frontier, page_results))
     findings.extend(_check_er006_er007(frontier, page_results))
     findings.extend(_check_er008(frontier, page_results))

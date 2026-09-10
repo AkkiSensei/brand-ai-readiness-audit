@@ -172,8 +172,12 @@ def _fetch_sitemap_urls(
     client: HttpClient,
     visited: set[str] | None = None,
     depth: int = 0,
+    t_start: float | None = None,
+    timeout_s: float | None = None,
 ) -> tuple[list[str], str]:
     """Recursively fetch sitemap URLs. Returns (urls, raw_xml)."""
+    if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
+        return [], ""
     if visited is None:
         visited = set()
     if sitemap_url in visited or depth > 3:
@@ -189,7 +193,11 @@ def _fetch_sitemap_urls(
         sub_urls = _parse_sitemap_xml(raw_xml)
         all_urls: list[str] = []
         for sub in sub_urls[:10]:
-            child_urls, _ = _fetch_sitemap_urls(sub, client, visited, depth + 1)
+            if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
+                break
+            child_urls, _ = _fetch_sitemap_urls(
+                sub, client, visited, depth + 1, t_start=t_start, timeout_s=timeout_s,
+            )
             all_urls.extend(child_urls)
             if len(all_urls) >= SITEMAP_MAX:
                 break
@@ -224,6 +232,8 @@ def _discover_frontier(
     target_url: str,
     client: HttpClient,
     max_pages: int = MAX_PAGES,
+    t_start: float | None = None,
+    timeout_s: float | None = None,
 ) -> tuple[list[str], dict[str, PageResult], list[str], str]:
     """BFS crawl to build the page frontier.
 
@@ -264,8 +274,13 @@ def _discover_frontier(
     sm_page_urls: list[str] = []
     sm_visited: set[str] = set()
     for sm_url in sm_candidates:
+        if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
+            errors.append("Sitemap discovery truncated: timeout budget reached")
+            break
         try:
-            urls, raw = _fetch_sitemap_urls(sm_url, client, sm_visited)
+            urls, raw = _fetch_sitemap_urls(
+                sm_url, client, sm_visited, t_start=t_start, timeout_s=timeout_s,
+            )
             sm_page_urls.extend(urls)
             if raw and not sitemap_xml:
                 sitemap_xml = raw
@@ -285,6 +300,9 @@ def _discover_frontier(
 
     # -- 5. BFS --
     while queue and len(frontier) < max_pages:
+        if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
+            errors.append("Crawl frontier truncated: timeout budget reached")
+            break
         url, depth = queue.pop(0)
         if url in visited:
             continue
@@ -772,10 +790,12 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     """
     max_pages = kwargs.get("max_pages", MAX_PAGES)
     renderer = kwargs.get("playwright", None)
+    timeout_s = kwargs.get("timeout_s", None)
+    t_start = kwargs.get("t_start", None)
 
     # 1. Discover frontier
     frontier, page_results, errors, sitemap_xml = _discover_frontier(
-        target_url, http_client, max_pages
+        target_url, http_client, max_pages, t_start=t_start, timeout_s=timeout_s,
     )
 
     # Check whether sitemap was declared in robots.txt
@@ -798,12 +818,19 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
 
     # 2. Run all checks
     findings: list[dict] = []
-    findings.extend(_check_cr001(target_url, http_client))
-    findings.extend(_check_cr002(page_results))
-    findings.extend(_check_cr003_cr004(page_results, renderer))
-    findings.extend(_check_cr005(page_results))
-    findings.extend(_check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots))
-    findings.extend(_check_cr008(page_results))
+    checks = [
+        lambda: _check_cr001(target_url, http_client),
+        lambda: _check_cr002(page_results),
+        lambda: _check_cr003_cr004(page_results, renderer),
+        lambda: _check_cr005(page_results),
+        lambda: _check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots),
+        lambda: _check_cr008(page_results),
+    ]
+    for check_fn in checks:
+        if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
+            errors.append("Crawl checks truncated: timeout budget reached")
+            break
+        findings.extend(check_fn())
 
     # 3. Proactive recommendations
     proactive = _proactive(page_results, target_url)

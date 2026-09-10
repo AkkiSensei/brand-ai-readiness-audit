@@ -41,6 +41,15 @@
       "description": "The audited site URL (hackathon required alias for target_url).",
       "format": "uri"
     },
+    "audit_status": {
+      "type": "string",
+      "enum": ["completed", "blocked_ssrf", "unreachable", "failed"],
+      "description": "Execution status indicating whether the audit completed or was aborted for safety or network reasons."
+    },
+    "audit_status_message": {
+      "type": "string",
+      "description": "Human-readable status or error description explaining completion or abort cause."
+    },
     "pages_audited": {
       "type": "integer",
       "description": "Total number of pages that were successfully fetched and analyzed.",

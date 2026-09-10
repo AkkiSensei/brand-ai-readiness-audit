@@ -47,6 +47,8 @@ _TOP_LEVEL_ALLOWED = {
     "audited_at",
     "target_url",
     "site",
+    "audit_status",
+    "audit_status_message",
     "pages_audited",
     "audit_duration_seconds",
     "summary",
@@ -185,6 +187,8 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     _check_type(report_data, "audited_at", str, errors)
     _check_type(report_data, "target_url", str, errors)
     _check_type(report_data, "site", str, errors)
+    _check_type(report_data, "audit_status", str, errors, optional=True)
+    _check_type(report_data, "audit_status_message", str, errors, optional=True)
     _check_type(report_data, "pages_audited", int, errors, optional=True)
     _check_type(report_data, "audit_duration_seconds", (int, float), errors, optional=True)
 

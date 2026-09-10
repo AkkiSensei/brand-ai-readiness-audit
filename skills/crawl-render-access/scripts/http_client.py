@@ -470,6 +470,15 @@ class HttpClient:
         """Perform a rate-limited, robots-compliant HTTP GET with SSRF and redirect validation."""
         result = PageResult(url=url)
 
+        # --- SSRF check on target URL ---
+        if not self._allow_private_ips:
+            target_host = urllib.parse.urlparse(url).hostname or ""
+            disallowed, reason = is_ssrf_disallowed(target_host)
+            if disallowed:
+                result.error = f"Blocked by SSRF protection: {reason}"
+                logger.warning("SSRF blocked: %s (%s)", url, reason)
+                return result
+
         # --- robots.txt check ---
         if not skip_robots_check:
             allowed = self.robots.can_fetch(url)
