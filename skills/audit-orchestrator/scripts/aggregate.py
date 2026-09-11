@@ -52,7 +52,7 @@ for p in (_HTTP_SCRIPTS, _SFE_SCRIPTS, _TEC_SCRIPTS, _ER_SCRIPTS, _ORCH_SCRIPTS)
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-from http_client import HttpClient, PageResult, is_ssrf_disallowed  # type: ignore[import]
+from http_client import HttpClient, PageResult, PlaywrightRenderer, is_ssrf_disallowed  # type: ignore[import]
 import crawl_audit  # type: ignore[import]
 import sfe_audit  # type: ignore[import]
 import tec_audit  # type: ignore[import]
@@ -158,6 +158,9 @@ def _normalise_finding(raw: dict, domain_name: str, target_url: str) -> dict:
         "suggested_action": suggested_action,
         "related_to": [],
     }
+
+    if "source" in raw:
+        finding["source"] = raw["source"]
 
     pages_affected = raw.get("pages_affected")
     pages_checked = raw.get("pages_checked")
@@ -500,6 +503,8 @@ def run_audit(
     target_url: str,
     max_pages: int = 15,
     timeout_s: int = 240,
+    render_js: bool = False,
+    renderer: Optional[PlaywrightRenderer] = None,
     **kwargs: Any,
 ) -> dict:
     """Orchestrate the complete AI-readiness audit pipeline.
@@ -507,6 +512,10 @@ def run_audit(
     Returns a fully validated JSON-Schema-compliant report dict.
     """
     t_start = time.monotonic()
+    if "render_js" in kwargs:
+        render_js = bool(kwargs["render_js"])
+    if "renderer" in kwargs and kwargs["renderer"] is not None:
+        renderer = kwargs["renderer"]
 
     # --- Initialise HTTP client ---
     target_host = urllib.parse.urlparse(target_url).hostname or ""
@@ -527,10 +536,28 @@ def run_audit(
 
     client = HttpClient(allow_private_ips=is_local_target)
 
+    own_renderer = False
+    if render_js and renderer is None:
+        try:
+            renderer = PlaywrightRenderer(
+                rate_limiter=client._limiter,
+                robots_cache=client.robots,
+                allow_private_ips=client._allow_private_ips,
+            )
+            own_renderer = True
+        except Exception as exc:
+            logger.warning("Failed to initialize PlaywrightRenderer: %s", exc)
+            renderer = None
+
     try:
-        return _run_pipeline(target_url, max_pages, timeout_s, client, t_start)
+        return _run_pipeline(target_url, max_pages, timeout_s, client, t_start, renderer=renderer)
     finally:
         client.close()
+        if own_renderer and renderer is not None:
+            try:
+                renderer.close()
+            except Exception:
+                pass
 
 
 def _run_pipeline(
@@ -539,6 +566,7 @@ def _run_pipeline(
     timeout_s: int,
     client: HttpClient,
     t_start: float,
+    renderer: Optional[PlaywrightRenderer] = None,
 ) -> dict:
     """Internal pipeline — separated for testability."""
     domain_results: dict[str, dict | None] = {
@@ -555,6 +583,7 @@ def _run_pipeline(
     try:
         crawl_result = crawl_audit.run_audit(
             target_url, client, max_pages=max_pages, timeout_s=timeout_s, t_start=t_start,
+            renderer=renderer,
         )
         domain_results["crawl-render-access"] = crawl_result
     except Exception as exc:
@@ -819,6 +848,19 @@ def _run_pipeline(
     if blocked_reason is not None:
         report["blocked_reason"] = blocked_reason
 
+    # Add optional rendered metrics if available from crawl_result
+    crawl_res = domain_results.get("crawl-render-access") or {}
+    if crawl_res.get("network_requests") is not None:
+        report["network_requests"] = crawl_res["network_requests"]
+    if crawl_res.get("performance_metrics") is not None:
+        report["performance_metrics"] = crawl_res["performance_metrics"]
+    if crawl_res.get("rendered_word_count") is not None:
+        report["rendered_word_count"] = crawl_res["rendered_word_count"]
+    if crawl_res.get("static_word_count") is not None:
+        report["static_word_count"] = crawl_res["static_word_count"]
+    if crawl_res.get("csr_blanking_ratio") is not None:
+        report["csr_blanking_ratio"] = crawl_res["csr_blanking_ratio"]
+
     # ==============================================================
     # STEP 16: Schema validation
     # ==============================================================
@@ -866,6 +908,10 @@ def _cli() -> None:
         help="Maximum pages to crawl (default: 15)",
     )
     parser.add_argument(
+        "--render-js", action="store_true", default=False,
+        help="Enable Playwright headless JS rendering (default: False)",
+    )
+    parser.add_argument(
         "--output", type=str, default=None,
         help="Path to write JSON report (default: stdout)",
     )
@@ -874,6 +920,7 @@ def _cli() -> None:
     report = run_audit(
         target_url=args.url,
         max_pages=args.max_pages,
+        render_js=args.render_js,
     )
 
     report_json = json.dumps(report, indent=2, ensure_ascii=False)

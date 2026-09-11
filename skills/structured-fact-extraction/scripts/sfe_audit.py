@@ -92,6 +92,7 @@ def _finding(
     related: list[str] | None = None,
     pages_affected: int | None = None,
     pages_checked: int | None = None,
+    source: str = "static",
 ) -> dict:
     d = {
         "local_id": local_id,
@@ -101,6 +102,7 @@ def _finding(
         "evidence": evidence,
         "suggested_action": {"summary": action, "priority": severity},
         "related_to": related or [],
+        "source": source,
     }
     if pages_affected is not None:
         d["pages_affected"] = pages_affected
@@ -814,6 +816,47 @@ def _proactive(frontier: list[str], page_results: dict[str, PageResult]) -> list
     return recs
 
 
+def _check_rendered_jsonld(
+    frontier: list[str],
+    page_results: dict[str, PageResult],
+) -> list[dict]:
+    """Detect JSON-LD structured data appearing post-rendering."""
+    findings: list[dict] = []
+    rendered_only_pages: list[str] = []
+    dynamic_types: set[str] = set()
+
+    for url in frontier:
+        pr = page_results.get(url)
+        if pr and pr.rendered_soup:
+            static_blocks = _extract_jsonld_blocks(pr.soup) if pr.soup else []
+            rendered_blocks = _extract_jsonld_blocks(pr.rendered_soup)
+
+            static_types = {t for b in static_blocks for t in _get_types(b)}
+            rend_types = {t for b in rendered_blocks for t in _get_types(b)}
+
+            diff = rend_types - static_types
+            if diff:
+                rendered_only_pages.append(url)
+                dynamic_types.update(diff)
+
+    if rendered_only_pages:
+        types_str = ", ".join(sorted(dynamic_types)[:5])
+        findings.append(_finding(
+            "SF-001",
+            "Dynamic JSON-LD structured data detected post-rendering",
+            "medium",
+            f"Schema types ({types_str}) appear exclusively in post-JS rendered DOM across "
+            f"{len(rendered_only_pages)} page(s): " + "; ".join(rendered_only_pages[:3]) +
+            ". Non-JS AI crawlers cannot discover these structured entities.",
+            "Pre-render or serve JSON-LD schema in initial server-side HTML responses "
+            "so AI search engines can ingest entity facts without executing client JavaScript.",
+            pages_affected=len(rendered_only_pages),
+            pages_checked=len(frontier),
+            source="rendered",
+        ))
+    return findings
+
+
 # ===================================================================
 # MAIN ENTRY POINT
 # ===================================================================
@@ -843,6 +886,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_sf005(frontier, page_results, http_client))
     findings.extend(_check_sf006(frontier, page_results))
     findings.extend(_check_sf007_sf008(frontier, page_results))
+    findings.extend(_check_rendered_jsonld(frontier, page_results))
 
     proactive = _proactive(frontier, page_results)
 

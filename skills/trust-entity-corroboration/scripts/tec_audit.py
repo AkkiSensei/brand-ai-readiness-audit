@@ -130,6 +130,7 @@ def _finding(
     related: list[str] | None = None,
     pages_affected: int | None = None,
     pages_checked: int | None = None,
+    source: str = "static",
 ) -> dict:
     d = {
         "local_id": local_id,
@@ -139,6 +140,7 @@ def _finding(
         "evidence": evidence,
         "suggested_action": {"summary": action, "priority": severity},
         "related_to": related or [],
+        "source": source,
     }
     if pages_affected is not None:
         d["pages_affected"] = pages_affected
@@ -808,6 +810,50 @@ def _proactive(
     return recs
 
 
+def _check_rendered_trust_signals(
+    frontier: list[str],
+    page_results: dict[str, PageResult],
+) -> list[dict]:
+    """Detect trust and entity corroboration signals appearing post-rendering."""
+    findings: list[dict] = []
+    rendered_sameas_pages: list[str] = []
+
+    for url in frontier:
+        pr = page_results.get(url)
+        if pr and pr.rendered_soup:
+            static_links = set()
+            if pr.soup:
+                for a in pr.soup.find_all("a", href=True):
+                    static_links.add(a.get("href", ""))
+            rendered_links = set()
+            for a in pr.rendered_soup.find_all("a", href=True):
+                rendered_links.add(a.get("href", ""))
+
+            new_links = rendered_links - static_links
+            has_auth = any(
+                any(dom in link for dom in _AUTHORITATIVE_DOMAINS)
+                for link in new_links
+            )
+            if has_auth:
+                rendered_sameas_pages.append(url)
+
+    if rendered_sameas_pages:
+        findings.append(_finding(
+            "TC-001",
+            "Dynamic sameAs social/entity graph links detected post-rendering",
+            "info",
+            f"Authoritative entity links appear in post-JS rendered DOM on "
+            f"{len(rendered_sameas_pages)} page(s): " + "; ".join(rendered_sameas_pages[:3]) +
+            ", but are absent in raw static HTML.",
+            "Ensure authoritative entity and social links are present in static HTML "
+            "markup to guarantee discovery by non-JS crawlers.",
+            pages_affected=len(rendered_sameas_pages),
+            pages_checked=len(frontier),
+            source="rendered",
+        ))
+    return findings
+
+
 # ===================================================================
 # MAIN ENTRY POINT
 # ===================================================================
@@ -835,6 +881,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s))
     findings.extend(_check_tc005(frontier, page_results))
     findings.extend(_check_tc004_tc006(frontier, page_results))
+    findings.extend(_check_rendered_trust_signals(frontier, page_results))
 
     proactive = _proactive(frontier, page_results)
 

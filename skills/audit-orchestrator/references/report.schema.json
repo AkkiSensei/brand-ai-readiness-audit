@@ -152,6 +152,33 @@
           "description": "Overall render confidence level for the audited site."
         }
       }
+    },
+    "network_requests": {
+      "type": "array",
+      "description": "Network requests captured during Playwright JS rendering.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "performance_metrics": {
+      "type": "object",
+      "description": "Performance timing metrics from browser navigation.",
+      "additionalProperties": true
+    },
+    "rendered_word_count": {
+      "type": "integer",
+      "description": "Computed word count of rendered page content.",
+      "minimum": 0
+    },
+    "static_word_count": {
+      "type": "integer",
+      "description": "Computed word count of static page content.",
+      "minimum": 0
+    },
+    "csr_blanking_ratio": {
+      "type": "number",
+      "description": "Ratio of static to rendered content length.",
+      "minimum": 0.0
     }
   },
   "definitions": {
@@ -296,6 +323,11 @@
           "minimum": 0.0,
           "maximum": 1.0,
           "description": "Proportion of audited pages affected by this finding (pages_affected / pages_checked)."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["static", "rendered"],
+          "description": "Indicates whether the finding was derived from static HTML or post-JS rendered DOM."
         }
       }
     },
@@ -327,6 +359,26 @@
         "pages_with_low_render_confidence": {
           "type": "integer",
           "minimum": 0
+        },
+        "network_requests": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "performance_metrics": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "rendered_word_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "static_word_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "csr_blanking_ratio": {
+          "type": "number",
+          "minimum": 0.0
         }
       }
     }

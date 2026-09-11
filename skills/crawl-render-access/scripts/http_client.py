@@ -93,6 +93,7 @@ KNOWN_AI_CRAWLERS: list[str] = _ROBOTS_CFG.get(
 )
 PLAYWRIGHT_WAIT_MS: int = int(_RENDER_CFG.get("playwright_wait_ms", 3000))
 PLAYWRIGHT_TIMEOUT_MS: int = int(_RENDER_CFG.get("playwright_timeout_ms", 15000))
+RENDER_TIMEOUT_MS: int = int(_RENDER_CFG.get("playwright_timeout_ms", 10000))
 PLAYWRIGHT_VIEWPORT: dict = {
     "width": int(_RENDER_CFG.get("playwright_viewport_width", 1280)),
     "height": int(_RENDER_CFG.get("playwright_viewport_height", 800)),
@@ -173,6 +174,24 @@ class PageResult:
 
     rendered_soup: Optional[BeautifulSoup] = None
     """Parsed BeautifulSoup from rendered_html."""
+
+    network_requests: list[dict] = field(default_factory=list)
+    """Captured network requests during Playwright JavaScript execution."""
+
+    performance_metrics: Optional[dict] = None
+    """Browser Performance Timing metrics (FCP, LCP, DOMContentLoaded, etc.)."""
+
+    render_error: Optional[str] = None
+    """Error message encountered during Playwright rendering, if any."""
+
+    rendered_word_count: Optional[int] = None
+    """Word count of visible text from rendered DOM."""
+
+    static_word_count: Optional[int] = None
+    """Word count of visible text from static HTML."""
+
+    csr_blanking_ratio: Optional[float] = None
+    """Ratio of static visible text length to rendered visible text length."""
 
     response_headers: dict = field(default_factory=dict)
     """Full response headers as a lowercase-keyed dict."""
@@ -725,15 +744,35 @@ class PlaywrightRenderer:
     Playwright is an optional dependency. If it is not installed, all
     render() calls return a PageResult with error set and is_rendered=False.
 
-    Usage:
-        with PlaywrightRenderer() as renderer:
-            result = renderer.render("https://example.com")
+    Features:
+      - Shared RateLimiter coordination with HttpClient.
+      - Shared RobotsTxtCache compliance verification.
+      - SSRF protection on initial navigation, mid-navigation redirects, and subrequests.
+      - Network request capture with fully resolved timings (requestfinished listener).
+      - W3C Navigation & Performance API metrics (FCP, LCP, DOMContentLoaded).
+      - Single browser process lifecycle with isolated per-render contexts.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        rate_limiter: Optional[RateLimiter] = None,
+        robots_cache: Optional[RobotsTxtCache] = None,
+        allow_private_ips: Optional[bool] = None,
+    ) -> None:
+        if allow_private_ips is None:
+            env_val = os.environ.get("ALLOW_PRIVATE_IPS", "").lower()
+            if env_val in ("1", "true", "yes"):
+                allow_private_ips = True
+            else:
+                allow_private_ips = bool(_HTTP_CFG.get("allow_private_ips", False))
+
+        self._allow_private_ips = allow_private_ips
+        self._limiter = rate_limiter
+        self._robots = robots_cache
         self._playwright = None
         self._browser = None
         self._available = self._check_availability()
+        self._launch_count = 0
 
     def _check_availability(self) -> bool:
         try:
@@ -747,7 +786,7 @@ class PlaywrightRenderer:
             return False
 
     def _ensure_browser(self) -> None:
-        """Lazily launch the Playwright browser."""
+        """Lazily launch the Playwright browser once across the crawler lifecycle."""
         if self._browser is not None:
             return
         from playwright.sync_api import sync_playwright  # type: ignore[import]
@@ -761,43 +800,192 @@ class PlaywrightRenderer:
                 "--disable-extensions",
             ],
         )
+        self._launch_count += 1
+        browser_pid = "unknown"
+        try:
+            if hasattr(self._browser, "_process") and self._browser._process:
+                browser_pid = str(self._browser._process.pid)
+            elif hasattr(self._browser, "process") and self._browser.process:
+                browser_pid = str(self._browser.process.pid)
+        except Exception:
+            pass
+        logger.info(
+            "Playwright browser launched (pid=%s, launch_count=%d)",
+            browser_pid,
+            self._launch_count,
+        )
 
-    def render(self, url: str, wait_ms: int = PLAYWRIGHT_WAIT_MS) -> PageResult:
+    def render(
+        self,
+        url: str,
+        wait_ms: int = PLAYWRIGHT_WAIT_MS,
+        page_result: Optional[PageResult] = None,
+    ) -> PageResult:
         """Render a page with Playwright and return the post-JS DOM.
 
         Args:
             url: The absolute URL to render.
             wait_ms: Milliseconds to wait after page load for JS execution.
+            page_result: Optional existing PageResult to populate in-place.
 
         Returns:
-            PageResult with rendered_html and rendered_soup populated on success.
+            PageResult with rendered_html, rendered_soup, network_requests,
+            performance_metrics, render_error populated.
         """
-        result = PageResult(url=url)
+        result = page_result if page_result is not None else PageResult(url=url)
         if not self._available:
-            result.error = "Playwright not installed; render skipped."
+            result.render_error = "Playwright not installed; render skipped."
+            result.error = result.error or result.render_error
+            result.render_confidence = "low"
             return result
+
+        parsed = urllib.parse.urlparse(url)
+        target_host = parsed.hostname or ""
+
+        # --- SSRF Check before navigation ---
+        if not self._allow_private_ips:
+            disallowed, reason = is_ssrf_disallowed(target_host)
+            if disallowed:
+                result.render_error = f"Blocked by SSRF protection: {reason}"
+                result.render_confidence = "low"
+                logger.warning("SSRF blocked in PlaywrightRenderer: %s (%s)", url, reason)
+                return result
+
+        # --- Robots.txt Check ---
+        if self._robots is not None:
+            if not self._robots.can_fetch(url):
+                result.render_error = f"robots.txt disallows rendering: {url}"
+                result.render_confidence = "low"
+                logger.info("Blocked by robots.txt in renderer: %s", url)
+                return result
+
+        # --- Shared Rate Limiter Check ---
+        if self._limiter is not None:
+            t0_pace = time.monotonic()
+            self._limiter.wait(target_host or url)
+            paced_time = time.monotonic() - t0_pace
+            if paced_time > 0.05:
+                logger.info("Renderer rate limiter paced host %s (slept %.3fs)", target_host, paced_time)
+
+        context = None
+        network_requests: list[dict] = []
+        req_entry_map: dict[Any, dict] = {}
+        ssrf_abort_events: list[tuple[str, str]] = []
 
         try:
             self._ensure_browser()
+            if self._browser is None:
+                result.render_error = "Playwright browser failed to launch."
+                result.render_confidence = "low"
+                return result
+
             context = self._browser.new_context(
                 viewport=PLAYWRIGHT_VIEWPORT,
                 user_agent=USER_AGENT,
             )
+
+            # SSRF Route Interception: protects all subrequests and mid-navigation redirects
+            if not self._allow_private_ips:
+                def intercept_route(route):
+                    req_url = route.request.url
+                    req_host = urllib.parse.urlparse(req_url).hostname or ""
+                    is_blocked, block_reason = is_ssrf_disallowed(req_host)
+                    if is_blocked:
+                        logger.warning("SSRF blocked route in Playwright: %s (%s)", req_url, block_reason)
+                        ssrf_abort_events.append((req_url, block_reason))
+                        route.abort("accessdenied")
+                        return
+                    route.continue_()
+
+                context.route("**/*", intercept_route)
+
             page = context.new_page()
+
+            def on_request(req):
+                entry = {
+                    "method": req.method,
+                    "url": req.url,
+                    "status": None,
+                    "resource_type": req.resource_type,
+                    "timing": None,
+                }
+                req_entry_map[req] = entry
+                network_requests.append(entry)
+
+            def on_response(resp):
+                entry = req_entry_map.get(resp.request)
+                if entry is not None:
+                    entry["status"] = resp.status
+                    try:
+                        entry["timing"] = resp.request.timing
+                    except Exception:
+                        pass
+
+            def on_request_finished(req):
+                entry = req_entry_map.get(req)
+                if entry is not None:
+                    try:
+                        entry["timing"] = req.timing
+                    except Exception:
+                        pass
+
+            def on_request_failed(req):
+                entry = req_entry_map.get(req)
+                if entry is not None:
+                    if entry.get("status") is None:
+                        entry["status"] = 0
+                    try:
+                        entry["timing"] = req.timing
+                    except Exception:
+                        pass
+
+            page.on("request", on_request)
+            page.on("response", on_response)
+            page.on("requestfinished", on_request_finished)
+            page.on("requestfailed", on_request_failed)
+
+            # Observe LCP if supported by browser
             try:
-                page.goto(url, timeout=PLAYWRIGHT_TIMEOUT_MS, wait_until="networkidle")
+                page.add_init_script("""
+                    window.__lcp = null;
+                    try {
+                        const observer = new PerformanceObserver((entryList) => {
+                            const entries = entryList.getEntries();
+                            if (entries.length > 0) {
+                                window.__lcp = entries[entries.length - 1].startTime;
+                            }
+                        });
+                        observer.observe({ type: 'largest-contentful-paint', buffered: true });
+                    } catch (e) {}
+                """)
             except Exception:
-                # Fallback: wait for domcontentloaded instead
-                try:
-                    page.goto(
-                        url,
-                        timeout=PLAYWRIGHT_TIMEOUT_MS,
-                        wait_until="domcontentloaded",
-                    )
-                except Exception as exc:
-                    result.error = f"Playwright navigation failed for {url}: {exc}"
-                    context.close()
+                pass
+
+            # Navigate: wait for networkidle or bounded timeout RENDER_TIMEOUT_MS
+            try:
+                page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="networkidle")
+            except Exception as nav_exc:
+                if ssrf_abort_events:
+                    viol_url, viol_reason = ssrf_abort_events[0]
+                    result.render_error = f"Blocked by SSRF protection on redirect/subrequest to {viol_url}: {viol_reason}"
+                    result.render_confidence = "low"
+                    result.network_requests = network_requests
                     return result
+                logger.debug("networkidle timeout/error for %s: %s; falling back to domcontentloaded", url, nav_exc)
+                try:
+                    _ = page.content()
+                except Exception:
+                    try:
+                        page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="domcontentloaded")
+                    except Exception as fallback_exc:
+                        if ssrf_abort_events:
+                            viol_url, viol_reason = ssrf_abort_events[0]
+                            result.render_error = f"Blocked by SSRF protection on redirect/subrequest to {viol_url}: {viol_reason}"
+                        else:
+                            result.render_error = f"Playwright navigation failed for {url}: {fallback_exc}"
+                        result.render_confidence = "low"
+                        result.network_requests = network_requests
+                        return result
 
             if wait_ms > 0:
                 try:
@@ -805,21 +993,75 @@ class PlaywrightRenderer:
                 except Exception:
                     pass
 
+            # Final pass to capture any completed response timings
+            for req, entry in req_entry_map.items():
+                try:
+                    t = req.timing
+                    if t:
+                        entry["timing"] = t
+                except Exception:
+                    pass
+
             result.rendered_html = page.content()
             result.is_rendered = True
             result.rendered_soup = _safe_parse_html(result.rendered_html)
+            result.network_requests = network_requests
 
-            # Capture HTTP-level info via response interception if available
+            # Capture Navigation Timing API & Performance API
             try:
-                result.status_code = 200  # Playwright doesn't easily expose final status
-            except Exception:
-                pass
+                metrics = page.evaluate("""() => {
+                    const nav = (performance.getEntriesByType('navigation')[0]) || {};
+                    const paint = performance.getEntriesByType('paint') || [];
+                    let fcp = null;
+                    for (const p of paint) {
+                        if (p.name === 'first-contentful-paint') {
+                            fcp = p.startTime;
+                        }
+                    }
+                    let lcp = window.__lcp || null;
+                    if (lcp === null) {
+                        try {
+                            const lcpEntries = performance.getEntriesByType('largest-contentful-paint') || [];
+                            if (lcpEntries.length > 0) {
+                                lcp = lcpEntries[lcpEntries.length - 1].startTime;
+                            }
+                        } catch (e) {}
+                    }
+                    const pt = performance.timing || {};
+                    const navStart = pt.navigationStart || 0;
+                    const dcl = nav.domContentLoadedEventEnd != null
+                        ? nav.domContentLoadedEventEnd
+                        : (pt.domContentLoadedEventEnd && navStart ? pt.domContentLoadedEventEnd - navStart : null);
+                    const load = nav.loadEventEnd != null
+                        ? nav.loadEventEnd
+                        : (pt.loadEventEnd && navStart ? pt.loadEventEnd - navStart : null);
 
-            context.close()
+                    return {
+                        "fcp": fcp,
+                        "lcp": lcp,
+                        "dom_content_loaded": dcl,
+                        "load_event": load,
+                        "duration": nav.duration || (load != null ? load : null),
+                        "transfer_size": nav.transferSize || null,
+                        "decoded_body_size": nav.decodedBodySize || null
+                    };
+                }""")
+                result.performance_metrics = metrics
+            except Exception as perf_exc:
+                logger.debug("Performance metrics evaluation failed for %s: %s", url, perf_exc)
+                result.performance_metrics = None
 
         except Exception as exc:
-            result.error = f"Playwright render error for {url}: {exc}"
-            logger.warning(result.error)
+            result.render_error = f"Playwright render error for {url}: {exc}"
+            result.render_confidence = "low"
+            result.network_requests = network_requests
+            logger.warning(result.render_error)
+        finally:
+            if context is not None:
+                try:
+                    context.close()
+                except Exception:
+                    pass
 
         return result
 

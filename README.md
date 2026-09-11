@@ -434,8 +434,7 @@ cd brand-ai-readiness-audit
 # Install all verified dependencies via requirements.txt
 python -m pip install -r requirements.txt
 
-# Optional: Install Playwright for headless browser evaluation
-pip install playwright
+# Optional: Install Playwright Chromium browser binaries for headless rendering
 playwright install chromium
 ```
 
@@ -444,11 +443,14 @@ playwright install chromium
 The audit orchestrator exposes a clean, standardized command-line interface via `aggregate.py`:
 
 ```bash
-# Basic audit: emit pure JSON report to stdout
+# Basic audit (static mode): emit pure JSON report to stdout
 python skills/audit-orchestrator/scripts/aggregate.py https://example.com
 
-# Limit crawl frontier scope (e.g. 5 pages max)
-python skills/audit-orchestrator/scripts/aggregate.py https://example.com --max-pages 5
+# Audit with real Playwright headless JavaScript rendering enabled
+python skills/audit-orchestrator/scripts/aggregate.py https://example.com --render-js
+
+# Limit crawl frontier scope (e.g. 5 pages max) with JS rendering
+python skills/audit-orchestrator/scripts/aggregate.py https://example.com --max-pages 5 --render-js
 
 # Export report directly to a file
 python skills/audit-orchestrator/scripts/aggregate.py https://example.com --max-pages 5 --output report.json
@@ -618,6 +620,16 @@ The output conforms strictly to `skills/audit-orchestrator/references/report.sch
 | `proactive_recommendations` | `array[string]` | High-level, beyond-the-defect strategic guidance strings for AI readiness. |
 | `coverage` | `object` | Detailed per-skill execution breakdown (`pages_checked`, `checks_run`, `errors`, `notes`), `pages_with_low_render_confidence`, and site-wide `render_confidence` (`high`, `medium`, `low`). |
 
+### 6.7 JS Rendering: Known Limitations
+
+While the `--render-js` headless Chromium integration enables high-fidelity dynamic DOM rendering and client-side CSR blanking detection, operators should be aware of the following architectural constraints:
+
+1. **Performance Overhead Per Page**:
+   - Headless browser navigation requires Chromium process context initialization, network idle evaluation, JavaScript execution wait (default 3,000ms), and full DOM serialization. While static HTTP requests complete in ~50–200ms per page, headless rendering incurs ~1,000–3,500ms per page. To prevent excessive crawl delays, `PlaywrightRenderer` maintains a single browser instance across the entire crawl frontier while isolating individual page evaluations in lightweight `BrowserContext` instances.
+2. **Anti-Bot & Headless Challenge Walls**:
+   - Web properties guarded by commercial anti-bot or WAF services (e.g., Cloudflare Turnstile, Cloudflare Under Attack mode, Akamai Bot Manager, DataDome) actively detect headless browser signatures and may return 403 Forbidden, 429 Too Many Requests, or challenge interstitials. In these scenarios, the pipeline degrades gracefully: `render_error` captures the condition, page `render_confidence` is marked as `"low"`, and the audit falls back to static HTML inspection without interrupting the run.
+3. **SSRF Protection Equivalence**:
+   - The headless browser renderer operates under the exact same multi-tier Server-Side Request Forgery (SSRF) protections as the static `HttpClient`. Before any browser navigation occurs, target hostnames and resolved IPs are verified against RFC 1918 private subnets, loopback addresses (`127.0.0.0/8`, `::1`), link-local/cloud-metadata endpoints (`169.254.169.254`), and internal domains. In addition, Playwright context routing (`context.route("**/*")`) intercepts all mid-navigation redirects and asynchronous subrequests (XHR, `fetch()`, assets); any attempt to divert the headless browser to an internal IP address is aborted immediately (`accessdenied`), ensuring full defense-in-depth parity with the static client.
 
 ---
 

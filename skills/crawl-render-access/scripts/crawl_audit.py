@@ -234,6 +234,7 @@ def _discover_frontier(
     max_pages: int = MAX_PAGES,
     t_start: float | None = None,
     timeout_s: float | None = None,
+    renderer: Optional[PlaywrightRenderer] = None,
 ) -> tuple[list[str], dict[str, PageResult], list[str], str]:
     """BFS crawl to build the page frontier.
 
@@ -253,6 +254,12 @@ def _discover_frontier(
     home = client.get(target_url)
     if home.error:
         errors.append(f"Homepage fetch failed: {home.error}")
+    if renderer is not None and home.is_html and not home.error:
+        try:
+            renderer.render(target_url, page_result=home)
+        except Exception as r_exc:
+            logger.warning("Renderer failed for %s: %s", target_url, r_exc)
+
     final_home = home.url or target_url
     page_results[final_home] = home
     frontier.append(final_home)
@@ -315,6 +322,11 @@ def _discover_frontier(
         pr = client.get(url)
         if pr.error:
             errors.append(f"Fetch error ({url}): {pr.error}")
+        if renderer is not None and pr.is_html and not pr.error:
+            try:
+                renderer.render(url, page_result=pr)
+            except Exception as r_exc:
+                logger.warning("Renderer failed for %s: %s", url, r_exc)
 
         final_url = pr.url or url
         page_results[final_url] = pr
@@ -480,14 +492,60 @@ def _check_cr003_cr004(
             if pr.soup is None:
                 continue
 
-            raw_ratio = extract_text_ratio(pr.soup)
-
-            # Extract visible text and word count to evaluate true content presence
+            # Extract visible text and word count from static HTML
             working = BeautifulSoup(str(pr.soup), "html.parser")
             for tag in working.find_all(["script", "style", "noscript", "meta", "link", "svg"]):
                 tag.decompose()
             visible_text = working.get_text(separator=" ", strip=True)
-            word_count = len(visible_text.split())
+            static_word_count = len(visible_text.split())
+            static_len = len(visible_text)
+            pr.static_word_count = static_word_count
+
+            # When real Playwright renderer is provided, use real rendered vs static comparison
+            if renderer is not None:
+                if pr.rendered_soup is None and pr.is_html and not pr.error:
+                    try:
+                        renderer.render(url, page_result=pr)
+                    except Exception:
+                        pass
+
+                if pr.render_error:
+                    pr.render_confidence = "low"
+
+                if pr.rendered_soup is not None:
+                    working_r = BeautifulSoup(str(pr.rendered_soup), "html.parser")
+                    for tag in working_r.find_all(["script", "style", "noscript", "meta", "link", "svg"]):
+                        tag.decompose()
+                    rendered_text = working_r.get_text(separator=" ", strip=True)
+                    rendered_word_count = len(rendered_text.split())
+                    rendered_len = len(rendered_text)
+                    pr.rendered_word_count = rendered_word_count
+
+                    # Real comparison: static text length vs rendered text length
+                    csr_blanking_ratio = (static_len / rendered_len) if rendered_len > 0 else 1.0
+                    pr.csr_blanking_ratio = round(csr_blanking_ratio, 3)
+
+                    disp = (
+                        f"{url} (static={static_len} chars / {static_word_count} words vs "
+                        f"rendered={rendered_len} chars / {rendered_word_count} words, "
+                        f"ratio={csr_blanking_ratio:.2f})"
+                    )
+
+                    if rendered_len >= 100 and csr_blanking_ratio < TEXT_BLANK_THRESH:
+                        severe_urls.add(url)
+                        display[url] = disp
+                        pr.render_confidence = "low"
+                    elif rendered_len >= 100 and csr_blanking_ratio < CSR_WARN_THRESH:
+                        moderate_urls.add(url)
+                        display[url] = disp
+                        pr.render_confidence = "medium"
+                    else:
+                        pr.render_confidence = "high"
+                    continue
+
+            # --- Static-only heuristic (used when renderer is None or render skipped) ---
+            raw_ratio = extract_text_ratio(pr.soup)
+            word_count = static_word_count
 
             # Detect empty SPA shells (app root + dynamic script + sparse initial text)
             html_str = str(pr.soup).lower()
@@ -506,43 +564,19 @@ def _check_cr003_cr004(
                 spa_shell_urls.add(url)
                 display.setdefault(url, f"{url} (SPA shell)")
 
-            # Compare rendered vs raw if Playwright is available
-            rendered_ratio: Optional[float] = None
-            rendered_ok = False
-            if renderer is not None:
-                try:
-                    rr = renderer.render(url)
-                    if rr.rendered_soup:
-                        rendered_ratio = extract_text_ratio(rr.rendered_soup)
-                        rendered_ok = True
-                except Exception:
-                    pass
-
             has_substantial_text = (word_count >= 250 and len(visible_text) >= 1000)
-
-            if rendered_ok and rendered_ratio is not None and rendered_ratio > raw_ratio:
-                # Playwright execution revealed dynamic content
-                disp = f"{url} (raw={raw_ratio:.2f}, rendered={rendered_ratio:.2f})"
-                if rendered_ratio >= TEXT_BLANK_THRESH:
-                    moderate_urls.add(url)
-                    display[url] = disp
-                else:
+            effective_ratio = raw_ratio
+            if not has_substantial_text:
+                disp = f"{url} (ratio={effective_ratio:.2f})"
+                if effective_ratio < TEXT_BLANK_THRESH and (word_count < 80 or is_spa):
                     severe_urls.add(url)
                     display[url] = disp
-            else:
-                effective_ratio = raw_ratio
-                if not has_substantial_text:
-                    disp = f"{url} (ratio={effective_ratio:.2f})"
-                    if effective_ratio < TEXT_BLANK_THRESH and (word_count < 80 or is_spa):
-                        severe_urls.add(url)
-                        display[url] = disp
-                    elif effective_ratio < CSR_WARN_THRESH or (effective_ratio < TEXT_BLANK_THRESH and word_count < 250):
-                        moderate_urls.add(url)
-                        display[url] = disp
+                elif effective_ratio < CSR_WARN_THRESH or (effective_ratio < TEXT_BLANK_THRESH and word_count < 250):
+                    moderate_urls.add(url)
+                    display[url] = disp
 
-            # Tag render confidence: 'low' when text-blanking detected without successful Playwright render
             has_blanking = (not has_substantial_text) and (raw_ratio < TEXT_BLANK_THRESH or is_spa)
-            if has_blanking and not rendered_ok:
+            if has_blanking:
                 pr.render_confidence = "low"
             else:
                 pr.render_confidence = "high"
@@ -908,13 +942,14 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     ``page_results`` for downstream skills.
     """
     max_pages = kwargs.get("max_pages", MAX_PAGES)
-    renderer = kwargs.get("playwright", None)
+    renderer = kwargs.get("renderer", kwargs.get("playwright", None))
     timeout_s = kwargs.get("timeout_s", None)
     t_start = kwargs.get("t_start", None)
 
     # 1. Discover frontier
     frontier, page_results, errors, sitemap_xml = _discover_frontier(
         target_url, http_client, max_pages, t_start=t_start, timeout_s=timeout_s,
+        renderer=renderer,
     )
 
     # Check whether sitemap was declared in robots.txt
@@ -954,7 +989,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     # 3. Proactive recommendations
     proactive = _proactive(page_results, target_url)
 
-    return {
+    payload = {
         "domain": "crawl-render-access",
         "pages_analyzed": sum(
             1 for pr in page_results.values()
@@ -975,3 +1010,14 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
         ],
         "page_results": page_results,
     }
+
+    # Attach primary page render details if available
+    primary_pr = page_results.get(target_url) or (next(iter(page_results.values())) if page_results else None)
+    if primary_pr and primary_pr.is_rendered:
+        payload["network_requests"] = primary_pr.network_requests
+        payload["performance_metrics"] = primary_pr.performance_metrics
+        payload["rendered_word_count"] = primary_pr.rendered_word_count
+        payload["static_word_count"] = primary_pr.static_word_count
+        payload["csr_blanking_ratio"] = primary_pr.csr_blanking_ratio
+
+    return payload

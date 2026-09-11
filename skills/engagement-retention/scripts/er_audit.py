@@ -143,6 +143,7 @@ def _finding(
     related: list[str] | None = None,
     pages_affected: int | None = None,
     pages_checked: int | None = None,
+    source: str = "static",
 ) -> dict:
     d = {
         "local_id": local_id,
@@ -152,6 +153,7 @@ def _finding(
         "evidence": evidence,
         "suggested_action": {"summary": action, "priority": severity},
         "related_to": related or [],
+        "source": source,
     }
     if pages_affected is not None:
         d["pages_affected"] = pages_affected
@@ -874,6 +876,50 @@ def _proactive(
     return recs
 
 
+def _check_rendered_engagement(
+    frontier: list[str],
+    page_results: dict[str, PageResult],
+) -> list[dict]:
+    """Detect engagement elements (CTAs or interactive overlays) post-rendering."""
+    findings: list[dict] = []
+    rendered_cta_pages: list[str] = []
+
+    for url in frontier:
+        pr = page_results.get(url)
+        if pr and pr.rendered_soup:
+            static_ctas = 0
+            if pr.soup:
+                for el in pr.soup.find_all(["a", "button"]):
+                    text = el.get_text(strip=True)
+                    if _CTA_RE.search(text):
+                        static_ctas += 1
+
+            rendered_ctas = 0
+            for el in pr.rendered_soup.find_all(["a", "button"]):
+                text = el.get_text(strip=True)
+                if _CTA_RE.search(text):
+                    rendered_ctas += 1
+
+            if static_ctas == 0 and rendered_ctas > 0:
+                rendered_cta_pages.append(url)
+
+    if rendered_cta_pages:
+        findings.append(_finding(
+            "ER-006",
+            "Dynamic call-to-action (CTA) elements detected post-rendering",
+            "info",
+            f"Primary conversion CTAs appear exclusively in post-JS rendered DOM on "
+            f"{len(rendered_cta_pages)} page(s): " + "; ".join(rendered_cta_pages[:3]) +
+            ", but are absent in raw static HTML.",
+            "Ensure primary user action buttons and links are present in static HTML "
+            "markup to allow AI agents to navigate conversion paths.",
+            pages_affected=len(rendered_cta_pages),
+            pages_checked=len(frontier),
+            source="rendered",
+        ))
+    return findings
+
+
 # ===================================================================
 # MAIN ENTRY POINT
 # ===================================================================
@@ -903,6 +949,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     findings.extend(_check_er005(frontier, page_results))
     findings.extend(_check_er006_er007(frontier, page_results))
     findings.extend(_check_er008(frontier, page_results))
+    findings.extend(_check_rendered_engagement(frontier, page_results))
 
     proactive = _proactive(frontier, page_results)
 
