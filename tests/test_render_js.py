@@ -145,6 +145,22 @@ class FixtureServer:
             self._server.server_close()
 
 
+try:
+    import pytest
+
+    @pytest.fixture
+    def server():
+        s = FixtureServer()
+        s.start()
+        try:
+            yield s
+        finally:
+            s.stop()
+            os.environ.pop("ALLOW_PRIVATE_IPS", None)
+except ImportError:
+    pass
+
+
 def test_1_csr_detection_real_fixture(server: FixtureServer) -> None:
     """Item 1 & 4: Test against 6_js_rendered.html fixture, proving non-trivial csr_blanking_ratio and resolved timings."""
     print("\n--- TEST 1: REAL CSR/SPA TARGET VALIDATION (6_js_rendered.html) ---")

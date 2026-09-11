@@ -773,6 +773,7 @@ class PlaywrightRenderer:
         self._browser = None
         self._available = self._check_availability()
         self._launch_count = 0
+        self._lock = threading.Lock()
 
     def _check_availability(self) -> bool:
         try:
@@ -789,31 +790,34 @@ class PlaywrightRenderer:
         """Lazily launch the Playwright browser once across the crawler lifecycle."""
         if self._browser is not None:
             return
-        from playwright.sync_api import sync_playwright  # type: ignore[import]
-        self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-extensions",
-            ],
-        )
-        self._launch_count += 1
-        browser_pid = "unknown"
-        try:
-            if hasattr(self._browser, "_process") and self._browser._process:
-                browser_pid = str(self._browser._process.pid)
-            elif hasattr(self._browser, "process") and self._browser.process:
-                browser_pid = str(self._browser.process.pid)
-        except Exception:
-            pass
-        logger.info(
-            "Playwright browser launched (pid=%s, launch_count=%d)",
-            browser_pid,
-            self._launch_count,
-        )
+        with self._lock:
+            if self._browser is not None:
+                return
+            from playwright.sync_api import sync_playwright  # type: ignore[import]
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-extensions",
+                ],
+            )
+            self._launch_count += 1
+            browser_pid = "unknown"
+            try:
+                if hasattr(self._browser, "_process") and self._browser._process:
+                    browser_pid = str(self._browser._process.pid)
+                elif hasattr(self._browser, "process") and self._browser.process:
+                    browser_pid = str(self._browser.process.pid)
+            except Exception:
+                pass
+            logger.info(
+                "Playwright browser launched (pid=%s, launch_count=%d)",
+                browser_pid,
+                self._launch_count,
+            )
 
     def render(
         self,
@@ -1067,18 +1071,19 @@ class PlaywrightRenderer:
 
     def close(self) -> None:
         """Shut down the Playwright browser."""
-        try:
-            if self._browser:
-                self._browser.close()
-                self._browser = None
-        except Exception:
-            pass
-        try:
-            if self._playwright:
-                self._playwright.stop()
-                self._playwright = None
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                if self._browser:
+                    self._browser.close()
+                    self._browser = None
+            except Exception:
+                pass
+            try:
+                if self._playwright:
+                    self._playwright.stop()
+                    self._playwright = None
+            except Exception:
+                pass
 
     def __enter__(self) -> "PlaywrightRenderer":
         return self

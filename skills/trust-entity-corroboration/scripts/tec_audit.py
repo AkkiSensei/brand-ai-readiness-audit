@@ -201,8 +201,11 @@ def _is_org_type(types: list[str]) -> bool:
 
 
 def _normalise_phone(phone: str) -> str:
-    """Strip a phone string to digits only for comparison."""
-    return re.sub(r"[^\d]", "", phone)
+    """Strip a phone string to digits only for comparison, normalising NANP 11-digit numbers."""
+    digits = re.sub(r"[^\d]", "", phone)
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits[1:]
+    return digits
 
 
 def _similarity(a: str, b: str) -> float:

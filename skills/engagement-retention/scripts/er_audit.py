@@ -905,7 +905,7 @@ def _check_rendered_engagement(
 
     if rendered_cta_pages:
         findings.append(_finding(
-            "ER-006",
+            "ER-005",
             "Dynamic call-to-action (CTA) elements detected post-rendering",
             "info",
             f"Primary conversion CTAs appear exclusively in post-JS rendered DOM on "
