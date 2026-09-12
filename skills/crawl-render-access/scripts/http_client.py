@@ -712,17 +712,10 @@ class HttpClient:
     def __init__(
         self,
         rate_limit_secs: float = RATE_LIMIT_SECS,
-        allow_private_ips: Optional[bool] = None,
+        allow_private_ips: bool = False,
         block_private_redirects: bool = True,
     ) -> None:
-        if allow_private_ips is None:
-            env_val = os.environ.get("ALLOW_PRIVATE_IPS", "").lower()
-            if env_val in ("1", "true", "yes"):
-                allow_private_ips = True
-            else:
-                allow_private_ips = bool(_HTTP_CFG.get("allow_private_ips", False))
-
-        self._allow_private_ips = allow_private_ips
+        self._allow_private_ips = bool(allow_private_ips)
         self._block_private_redirects = block_private_redirects
         self._limiter = RateLimiter(interval=rate_limit_secs)
         self._pin_manager = DestinationPinningManager()
@@ -1079,16 +1072,9 @@ class PlaywrightRenderer:
         self,
         rate_limiter: Optional[RateLimiter] = None,
         robots_cache: Optional[RobotsTxtCache] = None,
-        allow_private_ips: Optional[bool] = None,
+        allow_private_ips: bool = False,
     ) -> None:
-        if allow_private_ips is None:
-            env_val = os.environ.get("ALLOW_PRIVATE_IPS", "").lower()
-            if env_val in ("1", "true", "yes"):
-                allow_private_ips = True
-            else:
-                allow_private_ips = bool(_HTTP_CFG.get("allow_private_ips", False))
-
-        self._allow_private_ips = allow_private_ips
+        self._allow_private_ips = bool(allow_private_ips)
         self._limiter = rate_limiter
         self._robots = robots_cache
         self._playwright = None

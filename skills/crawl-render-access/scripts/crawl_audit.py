@@ -910,23 +910,6 @@ def _proactive(
                              "sites.",
                 "priority": "high",
             })
-
-        # Suggest canonical tags if none found
-        has_canonical = False
-        for pr in page_results.values():
-            if pr.soup and pr.soup.find("link", rel="canonical"):
-                has_canonical = True
-                break
-        if not has_canonical:
-            recs.append({
-                "title": "Add rel=canonical link elements",
-                "rationale": "Canonical tags prevent duplicate content issues and "
-                             "consolidate link signals for AI citation engines.",
-                "priority": "medium",
-            })
-
-
-
     except Exception as exc:
         logger.debug("Proactive recs error: %s", exc)
     return recs

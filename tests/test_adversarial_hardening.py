@@ -45,7 +45,7 @@ def test_h1_connection_refusal_blocked_status():
     s.close()
 
     target = f"http://127.0.0.1:{port}"
-    rep = aggregate.run_audit(target, timeout_s=5)
+    rep = aggregate.run_audit(target, timeout_s=5, allow_private_ips=True)
     assert rep["audit_status"] == "blocked"
     assert rep.get("blocked_reason") == "connection_failed"
     assert rep["pages_audited"] == 0
@@ -74,7 +74,7 @@ def test_h1_normal_working_completed_status():
         t.start()
 
         target = f"http://127.0.0.1:{port}/"
-        rep = aggregate.run_audit(target, timeout_s=10)
+        rep = aggregate.run_audit(target, timeout_s=10, allow_private_ips=True)
         httpd.shutdown()
 
     assert rep["audit_status"] == "completed"
@@ -105,7 +105,7 @@ def test_h1_partial_status_reachable():
 
         target = f"http://127.0.0.1:{port}/"
         # timeout_s=1 allows crawl to complete (~0.4s) but exhausts budget before downstream checks
-        rep = aggregate.run_audit(target, timeout_s=1)
+        rep = aggregate.run_audit(target, timeout_s=1, allow_private_ips=True)
         httpd.shutdown()
 
     assert rep["audit_status"] == "partial"

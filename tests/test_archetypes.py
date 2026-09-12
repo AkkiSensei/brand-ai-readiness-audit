@@ -209,7 +209,6 @@ def run_archetype_matrix() -> int:
     schema_all_passed = True
     false_positive_regressions = 0
 
-    os.environ["ALLOW_PRIVATE_IPS"] = "1"
     try:
         # -------------------------------------------------------------
         # [1/11] SPA
@@ -218,7 +217,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = spa_file
         spa_url = f"http://127.0.0.1:{port}/{spa_file}"
         t0 = time.time()
-        report_spa = run_audit(spa_url, max_pages=3)
+        report_spa = run_audit(spa_url, max_pages=3, allow_private_ips=True)
         spa_duration = round(time.time() - t0, 2)
 
         spa_rules = [f.get("local_id") for f in report_spa.get("findings", []) if f.get("local_id")]
@@ -246,7 +245,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = ecom_file
         ecom_url = f"http://127.0.0.1:{port}/{ecom_file}"
         t0 = time.time()
-        report_ecom = run_audit(ecom_url, max_pages=3)
+        report_ecom = run_audit(ecom_url, max_pages=3, allow_private_ips=True)
         ecom_duration = round(time.time() - t0, 2)
 
         ecom_rules = [f.get("local_id") for f in report_ecom.get("findings", []) if f.get("local_id")]
@@ -280,7 +279,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = legacy_file
         legacy_url = f"http://127.0.0.1:{port}/{legacy_file}"
         t0 = time.time()
-        report_legacy = run_audit(legacy_url, max_pages=3)
+        report_legacy = run_audit(legacy_url, max_pages=3, allow_private_ips=True)
         legacy_duration = round(time.time() - t0, 2)
 
         legacy_rules = [f.get("local_id") for f in report_legacy.get("findings", []) if f.get("local_id")]
@@ -316,7 +315,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = blog_file
         blog_url = f"http://127.0.0.1:{port}/{blog_file}"
         t0 = time.time()
-        report_blog = run_audit(blog_url, max_pages=3)
+        report_blog = run_audit(blog_url, max_pages=3, allow_private_ips=True)
         blog_duration = round(time.time() - t0, 2)
 
         blog_rules = [f.get("local_id") for f in report_blog.get("findings", []) if f.get("local_id")]
@@ -351,7 +350,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = paywall_file
         paywall_url = f"http://127.0.0.1:{port}/{paywall_file}"
         t0 = time.time()
-        report_paywall = run_audit(paywall_url, max_pages=3)
+        report_paywall = run_audit(paywall_url, max_pages=3, allow_private_ips=True)
         paywall_duration = round(time.time() - t0, 2)
 
         paywall_rules = [f.get("local_id") for f in report_paywall.get("findings", []) if f.get("local_id")]
@@ -383,7 +382,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = hydration_file
         hydration_url = f"http://127.0.0.1:{port}/{hydration_file}"
         t0 = time.time()
-        report_hydration = run_audit(hydration_url, max_pages=3)
+        report_hydration = run_audit(hydration_url, max_pages=3, allow_private_ips=True)
         hydration_duration = round(time.time() - t0, 2)
 
         hydration_rules = [f.get("local_id") for f in report_hydration.get("findings", []) if f.get("local_id")]
@@ -416,7 +415,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = cookie_file
         cookie_url = f"http://127.0.0.1:{port}/{cookie_file}"
         t0 = time.time()
-        report_cookie = run_audit(cookie_url, max_pages=3)
+        report_cookie = run_audit(cookie_url, max_pages=3, allow_private_ips=True)
         cookie_duration = round(time.time() - t0, 2)
 
         cookie_rules = [f.get("local_id") for f in report_cookie.get("findings", []) if f.get("local_id")]
@@ -448,7 +447,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = i18n_file
         i18n_url = f"http://127.0.0.1:{port}/{i18n_file}"
         t0 = time.time()
-        report_i18n = run_audit(i18n_url, max_pages=3)
+        report_i18n = run_audit(i18n_url, max_pages=3, allow_private_ips=True)
         i18n_duration = round(time.time() - t0, 2)
 
         i18n_rules = [f.get("local_id") for f in report_i18n.get("findings", []) if f.get("local_id")]
@@ -480,7 +479,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = agents_file
         agents_url = f"http://127.0.0.1:{port}/{agents_file}"
         t0 = time.time()
-        report_agents = run_audit(agents_url, max_pages=3)
+        report_agents = run_audit(agents_url, max_pages=3, allow_private_ips=True)
         agents_duration = round(time.time() - t0, 2)
 
         agents_rules = [f.get("local_id") for f in report_agents.get("findings", []) if f.get("local_id")]
@@ -514,7 +513,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = waf_file
         waf_url = f"http://127.0.0.1:{port}/{waf_file}"
         t0 = time.time()
-        report_waf = run_audit(waf_url, max_pages=3)
+        report_waf = run_audit(waf_url, max_pages=3, allow_private_ips=True)
         waf_duration = round(time.time() - t0, 2)
 
         waf_rules = [f.get("local_id") for f in report_waf.get("findings", []) if f.get("local_id")]
@@ -553,7 +552,7 @@ def run_archetype_matrix() -> int:
         ArchetypeRequestHandler.active_fixture = geo_file
         geo_url = f"http://127.0.0.1:{port}/{geo_file}"
         t0 = time.time()
-        report_geo = run_audit(geo_url, max_pages=3)
+        report_geo = run_audit(geo_url, max_pages=3, allow_private_ips=True)
         geo_duration = round(time.time() - t0, 2)
 
         geo_rules = [f.get("local_id") for f in report_geo.get("findings", []) if f.get("local_id")]
@@ -582,7 +581,6 @@ def run_archetype_matrix() -> int:
     finally:
         httpd.shutdown()
         httpd.server_close()
-        os.environ.pop("ALLOW_PRIVATE_IPS", None)
 
     # Step 3 regression check: dry_run_test and test_end_to_end
     step3_regression_pass = True

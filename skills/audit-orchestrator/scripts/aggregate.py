@@ -506,6 +506,7 @@ def run_audit(
     timeout_s: int = 240,
     render_js: bool = False,
     renderer: Optional[PlaywrightRenderer] = None,
+    allow_private_ips: bool = False,
     **kwargs: Any,
 ) -> dict:
     """Orchestrate the complete AI-readiness audit pipeline.
@@ -517,16 +518,13 @@ def run_audit(
         render_js = bool(kwargs["render_js"])
     if "renderer" in kwargs and kwargs["renderer"] is not None:
         renderer = kwargs["renderer"]
+    if "allow_private_ips" in kwargs:
+        allow_private_ips = bool(kwargs["allow_private_ips"])
 
     # --- Initialise HTTP client ---
     target_host = urllib.parse.urlparse(target_url).hostname or ""
-    # Test harnesses auditing local fixtures require explicit test gating
-    allow_local = bool(
-        kwargs.get("allow_private_ips", False)
-        or os.environ.get("ALLOW_PRIVATE_IPS") == "1"
-        or "pytest" in sys.modules
-    )
-    is_local_target = allow_local and (target_host in ("127.0.0.1", "localhost", "::1"))
+    # Only permit loopback/private target destinations when explicitly passed via allow_private_ips=True
+    is_local_target = bool(allow_private_ips) and (target_host in ("127.0.0.1", "localhost", "::1"))
 
     # Fast SSRF abort for disallowed targets
     if not is_local_target:

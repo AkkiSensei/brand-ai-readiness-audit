@@ -166,7 +166,6 @@ def server():
         yield srv
     finally:
         srv.stop()
-        os.environ.pop("ALLOW_PRIVATE_IPS", None)
 
 
 def test_1_csr_detection_real_fixture(server: FixtureServer) -> None:
@@ -174,12 +173,12 @@ def test_1_csr_detection_real_fixture(server: FixtureServer) -> None:
     print("\n--- TEST 1: REAL CSR/SPA TARGET VALIDATION (6_js_rendered.html) ---")
     url = f"http://127.0.0.1:{server.port}/6_js_rendered.html"
 
-    # Run aggregate pipeline with render_js=True and allow_private_ips for local test harness
-    os.environ["ALLOW_PRIVATE_IPS"] = "1"
+    # Run aggregate pipeline with render_js=True and allow_private_ips=True for local test harness
     report = aggregate.run_audit(
         target_url=url,
         max_pages=1,
         render_js=True,
+        allow_private_ips=True,
     )
 
     static_words = report.get("static_word_count")
@@ -397,7 +396,6 @@ def run_all():
         print("============================================================")
     finally:
         server.stop()
-        os.environ.pop("ALLOW_PRIVATE_IPS", None)
 
 
 if __name__ == "__main__":

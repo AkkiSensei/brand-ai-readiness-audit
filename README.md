@@ -564,7 +564,6 @@ The output conforms strictly to `skills/audit-orchestrator/references/report.sch
     }
   ],
   "proactive_recommendations": [
-    "Add rel=canonical link elements: Canonical tags prevent duplicate content issues and consolidate link signals for AI citation engines.",
     "Create or link to a Wikidata entity: Wikidata is the primary knowledge base for many AI systems. A verified Wikidata entry with sameAs linking significantly improves entity recognition.",
     "Add contactPoint to Organization schema: ContactPoint structured data helps AI engines surface your customer service details in responses.",
     "Add skip-to-content navigation link: A 'Skip to main content' link improves accessibility and signals good UX practices to AI quality evaluators."
