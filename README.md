@@ -671,6 +671,13 @@ The audit engine is designed to operate safely as a read-only evaluation client 
 * **Bounded Frontier Traversal**: Crawling is strictly capped at a default of 15 pages and a maximum link depth of 3 hops, preventing infinite loops on circular pagination paths or calendar traps.
 * **Timeouts & Exponential Backoff**: Network calls enforce a 5-second connection timeout and an 8-second read timeout. Network retries use exponential backoff (`Retry(total=2, backoff_factor=0.5)`).
 * **Stateless Sandboxing**: The engine requires zero persistent local databases, writes zero temporary scratch files during standard execution, and loads zero external neural model weights.
+* **SSRF Protection & Destination Pinning**:
+  - Private IPv4 ranges blocked (`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `0.0.0.0/8`).
+  - Private and local IPv6 ranges blocked (`::1/128`, `::/128`, `fc00::/7`, `fe80::/10`).
+  - IPv4-mapped IPv6 normalized (e.g. `::ffff:127.0.0.1` and `::ffff:169.254.169.254` unwrapped to IPv4 and evaluated against deny rules).
+  - DNS resolution pinned / destination validated: the IP that passed validation is pinned to the socket connection via `SSRFSafeHTTPAdapter`, defeating DNS rebinding and TOCTOU races while preserving TLS SNI and certificate validation.
+  - Redirects revalidated: all HTTP redirect hops are independently validated before socket connection.
+  - Failed, empty, or malformed DNS resolutions fail closed.
 
 ---
 
@@ -678,9 +685,11 @@ The audit engine is designed to operate safely as a read-only evaluation client 
 
 The repository includes an automated test suite confirming end-to-end operational integrity:
 
-```bash
-# Execute unit & regression test suite via pytest (12/12 passing)
-python -m pytest tests/
+# Execute unit & regression test suite via pytest
+python -m pytest tests/test_ssrf_hardening.py tests/test_adversarial_hardening.py tests/test_claim_corroboration.py
+
+# Execute SSRF hardening & DNS rebinding integration test suite (30/30 passing)
+python -m pytest tests/test_ssrf_hardening.py -v
 
 # Execute archetype matrix validation across all 11 web fixtures (11/11 passing)
 python tests/test_archetypes.py

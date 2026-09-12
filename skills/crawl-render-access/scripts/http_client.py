@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -40,6 +41,10 @@ import requests
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import urllib3.connection
+import urllib3.connectionpool
+import urllib3.exceptions
+import urllib3.util.connection as conn_util
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -100,50 +105,306 @@ PLAYWRIGHT_VIEWPORT: dict = {
 }
 
 # ---------------------------------------------------------------------------
-# SSRF Disallowed Address Ranges
+# SSRF Disallowed Address Ranges & Destination Pinning
 # ---------------------------------------------------------------------------
 _DISALLOWED_NETWORKS = [
+    # IPv4
     ipaddress.ip_network("127.0.0.0/8"),       # Loopback IPv4
     ipaddress.ip_network("10.0.0.0/8"),        # Private RFC1918
     ipaddress.ip_network("172.16.0.0/12"),     # Private RFC1918
     ipaddress.ip_network("192.168.0.0/16"),    # Private RFC1918
     ipaddress.ip_network("169.254.0.0/16"),    # Link-local / Cloud Metadata (169.254.169.254)
-    ipaddress.ip_network("0.0.0.0/8"),         # Current network
+    ipaddress.ip_network("0.0.0.0/8"),         # Current / unspecified network
+    # IPv6
     ipaddress.ip_network("::1/128"),           # Loopback IPv6
-    ipaddress.ip_network("fc00::/7"),          # Unique local IPv6
+    ipaddress.ip_network("::/128"),            # Unspecified IPv6
+    ipaddress.ip_network("fc00::/7"),          # Unique local IPv6 (ULA)
     ipaddress.ip_network("fe80::/10"),         # Link-local IPv6
 ]
 
+
+def normalize_ip(ip_or_str: str | ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Normalize an IP address or string, extracting the IPv4 address from IPv4-mapped IPv6."""
+    if isinstance(ip_or_str, str):
+        ip = ipaddress.ip_address(ip_or_str.strip("[]"))
+    else:
+        ip = ip_or_str
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        return mapped
+    return ip
+
+
+def is_ip_disallowed(ip_or_str: str | ipaddress.IPv4Address | ipaddress.IPv6Address) -> tuple[bool, str]:
+    """Check whether a single IP address (with IPv4-mapped IPv6 normalization) falls in any disallowed network."""
+    try:
+        norm_ip = normalize_ip(ip_or_str)
+        for net in _DISALLOWED_NETWORKS:
+            if norm_ip in net:
+                return True, f"IP {norm_ip} is in disallowed network {net}"
+        return False, ""
+    except Exception as exc:
+        return True, f"Malformed or invalid IP '{ip_or_str}': {exc}"
+
+
+def resolve_and_validate_destination(
+    hostname_or_ip: str,
+    allow_private_ips: bool = False,
+) -> tuple[bool, str, list[str]]:
+    """Resolve a destination and validate all resulting IP addresses against SSRF policies.
+
+    Returns:
+        (is_disallowed, reason, list_of_validated_ips)
+    """
+    if not hostname_or_ip:
+        return False, "", []
+
+    cleaned = hostname_or_ip.strip("[]")
+
+    # 1. Direct IP string
+    try:
+        ip_obj = ipaddress.ip_address(cleaned)
+        if allow_private_ips:
+            return False, "", [str(ip_obj)]
+        disallowed, reason = is_ip_disallowed(ip_obj)
+        if disallowed:
+            return True, reason, []
+        return False, "", [str(normalize_ip(ip_obj))]
+    except ValueError:
+        pass
+
+    # 2. Check restricted local domain names
+    if not allow_private_ips and cleaned.lower() in ("localhost", "metadata.google.internal"):
+        return True, f"Hostname '{hostname_or_ip}' is a restricted local domain", []
+
+    # 3. Resolve hostname via DNS
+    try:
+        addr_info = socket.getaddrinfo(cleaned, None)
+        if not addr_info:
+            return True, f"DNS resolution for '{hostname_or_ip}' returned no addresses", []
+
+        valid_ips: list[str] = []
+        for res in addr_info:
+            ip_str = res[4][0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                if not allow_private_ips:
+                    disallowed, reason = is_ip_disallowed(ip_obj)
+                    if disallowed:
+                        return True, f"Hostname '{hostname_or_ip}' resolved to disallowed IP {ip_str} ({reason})", []
+                valid_ips.append(str(normalize_ip(ip_obj)))
+            except ValueError:
+                return True, f"Hostname '{hostname_or_ip}' resolved to malformed IP '{ip_str}'", []
+
+        # Deduplicate while preserving order
+        unique_ips = list(dict.fromkeys(valid_ips))
+        return False, "", unique_ips
+    except Exception as exc:
+        # Phase 2.5: DNS resolution failures must fail closed
+        return True, f"DNS resolution failed for hostname '{hostname_or_ip}': {exc}", []
+
+
 def is_ssrf_disallowed(hostname_or_ip: str) -> tuple[bool, str]:
     """Check if a hostname or IP resolves to a private, loopback, link-local, or cloud-metadata address."""
-    if not hostname_or_ip:
-        return False, ""
-    try:
-        # Check if direct IP string
+    disallowed, reason, _ = resolve_and_validate_destination(hostname_or_ip, allow_private_ips=False)
+    return disallowed, reason
+
+
+class DestinationPinningManager:
+    """Thread-safe destination pinning cache mapping hostnames to validated IP addresses."""
+
+    def __init__(self) -> None:
+        self._pinned: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def pin(self, host: str, ip: str) -> None:
+        if not host or not ip:
+            return
+        with self._lock:
+            self._pinned[host.lower()] = ip
+
+    def get(self, host: str) -> Optional[str]:
+        if not host:
+            return None
+        with self._lock:
+            return self._pinned.get(host.lower())
+
+    def clear(self) -> None:
+        with self._lock:
+            self._pinned.clear()
+
+
+class SSRFSafeHTTPConnection(urllib3.connection.HTTPConnection):
+    """HTTPConnection that pins the socket connection to a pre-validated IP address."""
+
+    def __init__(
+        self,
+        *args,
+        pin_manager: Optional[DestinationPinningManager] = None,
+        allow_private_ips: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._pin_manager = pin_manager
+        self._allow_private_ips = allow_private_ips
+
+    def _new_conn(self) -> socket.socket:
+        target_ip = None
+        if not self._allow_private_ips:
+            try:
+                ip_obj = ipaddress.ip_address(self.host.strip("[]"))
+                disallowed, reason = is_ip_disallowed(ip_obj)
+                if disallowed:
+                    raise urllib3.exceptions.NewConnectionError(
+                        self, f"Blocked by SSRF protection: {reason}"
+                    )
+                target_ip = str(normalize_ip(ip_obj))
+            except ValueError:
+                if self._pin_manager:
+                    target_ip = self._pin_manager.get(self.host)
+                if not target_ip:
+                    disallowed, reason, ips = resolve_and_validate_destination(
+                        self.host, allow_private_ips=self._allow_private_ips
+                    )
+                    if disallowed or not ips:
+                        raise urllib3.exceptions.NewConnectionError(
+                            self, f"Blocked by SSRF protection: {reason or 'no valid IP addresses resolved'}"
+                        )
+                    target_ip = ips[0]
+                    if self._pin_manager:
+                        self._pin_manager.pin(self.host, target_ip)
+
+        connect_host = target_ip if target_ip else self._dns_host
         try:
-            ip = ipaddress.ip_address(hostname_or_ip)
-            for net in _DISALLOWED_NETWORKS:
-                if ip in net:
-                    return True, f"IP {ip} is in disallowed network {net}"
-            return False, ""
-        except ValueError:
-            pass
+            sock = conn_util.create_connection(
+                (connect_host, self.port),
+                self.timeout,
+                source_address=self.source_address,
+                socket_options=self.socket_options,
+            )
+        except socket.gaierror as e:
+            raise urllib3.exceptions.NameResolutionError(self.host, self, e) from e
+        except TimeoutError as e:
+            raise urllib3.exceptions.ConnectTimeoutError(
+                self,
+                f"Connection to {self.host} timed out. (connect timeout={self.timeout})",
+            ) from e
+        except OSError as e:
+            raise urllib3.exceptions.NewConnectionError(
+                self, f"Failed to establish a new connection: {e}"
+            ) from e
 
-        # Check common local names
-        if hostname_or_ip.lower() in ("localhost", "metadata.google.internal"):
-            return True, f"Hostname '{hostname_or_ip}' is a restricted local domain"
+        sys.audit("http.client.connect", self, self.host, self.port)
+        return sock
 
-        # Resolve hostname via DNS
-        addr_info = socket.getaddrinfo(hostname_or_ip, None)
-        for family, socktype, proto, canonname, sockaddr in addr_info:
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-            for net in _DISALLOWED_NETWORKS:
-                if ip in net:
-                    return True, f"Hostname '{hostname_or_ip}' resolved to disallowed IP {ip} in {net}"
-        return False, ""
-    except Exception:
-        return False, ""
+
+class SSRFSafeHTTPSConnection(urllib3.connection.HTTPSConnection):
+    """HTTPSConnection that connects strictly to the pre-validated/pinned IP while preserving TLS SNI and cert validation."""
+
+    def __init__(
+        self,
+        *args,
+        pin_manager: Optional[DestinationPinningManager] = None,
+        allow_private_ips: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._pin_manager = pin_manager
+        self._allow_private_ips = allow_private_ips
+
+    def _new_conn(self) -> socket.socket:
+        target_ip = None
+        if not self._allow_private_ips:
+            try:
+                ip_obj = ipaddress.ip_address(self.host.strip("[]"))
+                disallowed, reason = is_ip_disallowed(ip_obj)
+                if disallowed:
+                    raise urllib3.exceptions.NewConnectionError(
+                        self, f"Blocked by SSRF protection: {reason}"
+                    )
+                target_ip = str(normalize_ip(ip_obj))
+            except ValueError:
+                if self._pin_manager:
+                    target_ip = self._pin_manager.get(self.host)
+                if not target_ip:
+                    disallowed, reason, ips = resolve_and_validate_destination(
+                        self.host, allow_private_ips=self._allow_private_ips
+                    )
+                    if disallowed or not ips:
+                        raise urllib3.exceptions.NewConnectionError(
+                            self, f"Blocked by SSRF protection: {reason or 'no valid IP addresses resolved'}"
+                        )
+                    target_ip = ips[0]
+                    if self._pin_manager:
+                        self._pin_manager.pin(self.host, target_ip)
+
+        connect_host = target_ip if target_ip else self._dns_host
+        try:
+            sock = conn_util.create_connection(
+                (connect_host, self.port),
+                self.timeout,
+                source_address=self.source_address,
+                socket_options=self.socket_options,
+            )
+        except socket.gaierror as e:
+            raise urllib3.exceptions.NameResolutionError(self.host, self, e) from e
+        except TimeoutError as e:
+            raise urllib3.exceptions.ConnectTimeoutError(
+                self,
+                f"Connection to {self.host} timed out. (connect timeout={self.timeout})",
+            ) from e
+        except OSError as e:
+            raise urllib3.exceptions.NewConnectionError(
+                self, f"Failed to establish a new connection: {e}"
+            ) from e
+
+        sys.audit("http.client.connect", self, self.host, self.port)
+        return sock
+
+
+class SSRFSafeHTTPAdapter(HTTPAdapter):
+    """Requests HTTPAdapter enforcing SSRF destination validation and pinning socket connections."""
+
+    def __init__(
+        self,
+        pin_manager: Optional[DestinationPinningManager] = None,
+        allow_private_ips: bool = False,
+        **kwargs,
+    ) -> None:
+        self.pin_manager = pin_manager or DestinationPinningManager()
+        self.allow_private_ips = allow_private_ips
+        super().__init__(**kwargs)
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        conn = super().get_connection_with_tls_context(request, verify, proxies, cert)
+        if getattr(conn, "scheme", "") == "https":
+            conn.ConnectionCls = SSRFSafeHTTPSConnection
+        else:
+            conn.ConnectionCls = SSRFSafeHTTPConnection
+        conn.conn_kw["pin_manager"] = self.pin_manager
+        conn.conn_kw["allow_private_ips"] = self.allow_private_ips
+        return conn
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        if not self.allow_private_ips:
+            url_parsed = urllib.parse.urlparse(request.url)
+            host = url_parsed.hostname or ""
+            pinned = self.pin_manager.get(host)
+            if pinned:
+                disallowed, reason = is_ip_disallowed(pinned)
+                if disallowed:
+                    raise requests.exceptions.ConnectionError(
+                        f"Blocked by SSRF protection: pinned IP {pinned} is disallowed ({reason})"
+                    )
+            else:
+                disallowed, reason, ips = resolve_and_validate_destination(host, allow_private_ips=False)
+                if disallowed or not ips:
+                    raise requests.exceptions.ConnectionError(
+                        f"Blocked by SSRF protection: {reason or 'no valid IP addresses resolved'}"
+                    )
+                self.pin_manager.pin(host, ips[0])
+
+        return super().send(request, stream=stream, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +710,7 @@ class HttpClient:
         self._allow_private_ips = allow_private_ips
         self._block_private_redirects = block_private_redirects
         self._limiter = RateLimiter(interval=rate_limit_secs)
+        self._pin_manager = DestinationPinningManager()
         self._session = self._build_session()
         self.robots = RobotsTxtCache(self._session, self._limiter, allow_private_ips=self._allow_private_ips)
 
@@ -462,7 +724,11 @@ class HttpClient:
             status=0,
             raise_on_status=False,
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        adapter = SSRFSafeHTTPAdapter(
+            pin_manager=self._pin_manager,
+            allow_private_ips=self._allow_private_ips,
+            max_retries=retry_strategy,
+        )
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         return session
@@ -489,14 +755,16 @@ class HttpClient:
         """Perform a rate-limited, robots-compliant HTTP GET with SSRF and redirect validation."""
         result = PageResult(url=url)
 
-        # --- SSRF check on target URL ---
+        # --- SSRF check on target URL and destination pinning ---
         if not self._allow_private_ips:
             target_host = urllib.parse.urlparse(url).hostname or ""
-            disallowed, reason = is_ssrf_disallowed(target_host)
+            disallowed, reason, ips = resolve_and_validate_destination(target_host, allow_private_ips=False)
             if disallowed:
                 result.error = f"Blocked by SSRF protection: {reason}"
                 logger.warning("SSRF blocked: %s (%s)", url, reason)
                 return result
+            if ips:
+                self._pin_manager.pin(target_host, ips[0])
 
         # --- robots.txt check ---
         if not skip_robots_check:
@@ -525,14 +793,16 @@ class HttpClient:
                 parsed = urllib.parse.urlparse(current_url)
                 hostname = parsed.hostname or ""
 
-                # Check SSRF on current_url
+                # Check SSRF on current_url and pin
                 if not self._allow_private_ips:
-                    disallowed, reason = is_ssrf_disallowed(hostname)
+                    disallowed, reason, cur_ips = resolve_and_validate_destination(hostname, allow_private_ips=False)
                     if disallowed:
                         result.fetch_duration_seconds = time.monotonic() - t0
                         result.error = f"Blocked by SSRF protection: {reason}"
                         logger.warning("SSRF blocked: %s (%s)", current_url, reason)
                         return result
+                    if cur_ips:
+                        self._pin_manager.pin(hostname, cur_ips[0])
 
                 req_headers = {}
                 if headers:
@@ -552,13 +822,20 @@ class HttpClient:
                     next_hostname = urllib.parse.urlparse(next_url).hostname or ""
 
                     # Check SSRF on redirect target
-                    disallowed, reason = is_ssrf_disallowed(next_hostname)
-                    if disallowed and (not self._allow_private_ips or self._block_private_redirects):
+                    check_allow_private = self._allow_private_ips and not self._block_private_redirects
+                    disallowed, reason, next_ips = resolve_and_validate_destination(
+                        next_hostname,
+                        allow_private_ips=check_allow_private,
+                    )
+                    if disallowed:
                         result.fetch_duration_seconds = time.monotonic() - t0
                         result.error = f"Blocked by SSRF protection on redirect to {next_url}: {reason}"
                         result.redirect_chain = redirect_chain
                         logger.warning("SSRF blocked redirect: %s -> %s (%s)", current_url, next_url, reason)
                         return result
+
+                    if next_ips:
+                        self._pin_manager.pin(next_hostname, next_ips[0])
 
                     current_url = next_url
                     continue
@@ -642,7 +919,12 @@ class HttpClient:
             logger.warning(result.error)
         except requests.exceptions.ConnectionError as exc:
             result.fetch_duration_seconds = time.monotonic() - t0
-            result.error = f"Connection error for {url}: {exc}"
+            exc_str = str(exc)
+            if "Blocked by SSRF protection:" in exc_str:
+                clean_msg = exc_str.split("Blocked by SSRF protection:")[-1].strip(" :'\")")
+                result.error = f"Blocked by SSRF protection: {clean_msg}"
+            else:
+                result.error = f"Connection error for {url}: {exc}"
             logger.warning(result.error)
         except Exception as exc:
             result.fetch_duration_seconds = time.monotonic() - t0
@@ -667,16 +949,28 @@ class HttpClient:
         resp = None
 
         try:
+            # Check initial URL SSRF and pin
+            if not self._allow_private_ips:
+                target_host = urllib.parse.urlparse(url).hostname or ""
+                disallowed, reason, ips = resolve_and_validate_destination(target_host, allow_private_ips=False)
+                if disallowed:
+                    result.error = f"HEAD blocked by SSRF protection: {reason}"
+                    return result
+                if ips:
+                    self._pin_manager.pin(target_host, ips[0])
+
             for _ in range(max_redirects + 1):
                 parsed = urllib.parse.urlparse(current_url)
                 hostname = parsed.hostname or ""
 
                 if not self._allow_private_ips:
-                    disallowed, reason = is_ssrf_disallowed(hostname)
+                    disallowed, reason, cur_ips = resolve_and_validate_destination(hostname, allow_private_ips=False)
                     if disallowed:
                         result.fetch_duration_seconds = time.monotonic() - t0
                         result.error = f"HEAD blocked by SSRF protection: {reason}"
                         return result
+                    if cur_ips:
+                        self._pin_manager.pin(hostname, cur_ips[0])
 
                 self._limiter.wait(self._host(current_url))
                 resp = self._session.head(
@@ -690,12 +984,20 @@ class HttpClient:
                     next_url = urllib.parse.urljoin(current_url, resp.headers["Location"])
                     next_hostname = urllib.parse.urlparse(next_url).hostname or ""
 
-                    disallowed, reason = is_ssrf_disallowed(next_hostname)
-                    if disallowed and (not self._allow_private_ips or self._block_private_redirects):
+                    # Check SSRF on redirect target
+                    check_allow_private = self._allow_private_ips and not self._block_private_redirects
+                    disallowed, reason, next_ips = resolve_and_validate_destination(
+                        next_hostname,
+                        allow_private_ips=check_allow_private,
+                    )
+                    if disallowed:
                         result.fetch_duration_seconds = time.monotonic() - t0
                         result.error = f"HEAD blocked by SSRF protection on redirect to {next_url}: {reason}"
                         result.redirect_chain = redirect_chain
                         return result
+
+                    if next_ips:
+                        self._pin_manager.pin(next_hostname, next_ips[0])
 
                     current_url = next_url
                     continue
@@ -715,7 +1017,12 @@ class HttpClient:
         except requests.exceptions.Timeout as exc:
             result.error = f"HEAD timeout for {url}: {exc}"
         except requests.exceptions.ConnectionError as exc:
-            result.error = f"HEAD connection error for {url}: {exc}"
+            exc_str = str(exc)
+            if "Blocked by SSRF protection:" in exc_str:
+                clean_msg = exc_str.split("Blocked by SSRF protection:")[-1].strip(" :'\")")
+                result.error = f"HEAD blocked by SSRF protection: {clean_msg}"
+            else:
+                result.error = f"HEAD connection error for {url}: {exc}"
         except Exception as exc:
             result.error = f"HEAD unexpected error for {url}: {exc}"
         return result
