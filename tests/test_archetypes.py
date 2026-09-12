@@ -209,6 +209,7 @@ def run_archetype_matrix() -> int:
     schema_all_passed = True
     false_positive_regressions = 0
 
+    os.environ["ALLOW_PRIVATE_IPS"] = "1"
     try:
         # -------------------------------------------------------------
         # [1/11] SPA
@@ -581,6 +582,7 @@ def run_archetype_matrix() -> int:
     finally:
         httpd.shutdown()
         httpd.server_close()
+        os.environ.pop("ALLOW_PRIVATE_IPS", None)
 
     # Step 3 regression check: dry_run_test and test_end_to_end
     step3_regression_pass = True

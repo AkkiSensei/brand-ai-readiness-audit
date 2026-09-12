@@ -20,10 +20,10 @@ import socket
 import sys
 import threading
 import time
+import pytest
 from pathlib import Path
 
 # Add script paths
-__test__ = False  # Standalone suite executed via python tests/test_render_js.py
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "skills" / "crawl-render-access" / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "skills" / "audit-orchestrator" / "scripts"))
@@ -144,6 +144,29 @@ class FixtureServer:
         if self._server:
             self._server.shutdown()
             self._server.server_close()
+
+
+try:
+    import playwright
+    _PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    _PLAYWRIGHT_AVAILABLE = False
+
+pytestmark = pytest.mark.skipif(
+    not _PLAYWRIGHT_AVAILABLE,
+    reason="playwright not installed",
+)
+
+
+@pytest.fixture(scope="module")
+def server():
+    srv = FixtureServer()
+    srv.start()
+    try:
+        yield srv
+    finally:
+        srv.stop()
+        os.environ.pop("ALLOW_PRIVATE_IPS", None)
 
 
 def test_1_csr_detection_real_fixture(server: FixtureServer) -> None:

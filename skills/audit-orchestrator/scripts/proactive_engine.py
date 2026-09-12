@@ -475,6 +475,40 @@ def _pa006(
 
 
 # ------------------------------------------------------------------
+# PA-CANONICAL: rel=canonical link detection
+# ------------------------------------------------------------------
+
+def _pa_canonical(
+    page_results: dict[str, PageResult],
+    existing_ids: set[str],
+) -> Optional[dict]:
+    """Check for <link rel="canonical"> declarations across crawled pages."""
+    try:
+        if not page_results:
+            return None
+        has_canonical = False
+        for pr in page_results.values():
+            if pr and pr.soup and pr.soup.find("link", rel="canonical"):
+                has_canonical = True
+                break
+        if not has_canonical:
+            first_url = next(iter(page_results), "")
+            return _make_finding(
+                "PA-CANONICAL",
+                "Add rel=canonical link elements",
+                first_url,
+                "No <link rel='canonical'> element was found across any crawled page.",
+                "Canonical tags prevent duplicate content issues and "
+                "consolidate link signals for AI citation engines.",
+                category="proactive",
+            )
+        return None
+    except Exception as exc:
+        logger.debug("PA-CANONICAL error: %s", exc)
+        return None
+
+
+# ------------------------------------------------------------------
 # Public API
 # ------------------------------------------------------------------
 
@@ -484,7 +518,7 @@ def inject_proactive_recommendations(
     http_client: HttpClient,
     target_url: str,
 ) -> list[dict]:
-    """Generate PA-001..PA-006 proactive recommendations.
+    """Generate PA-001..PA-006 and canonical proactive recommendations.
 
     Inspects existing findings to suppress duplicates.
 
@@ -501,6 +535,7 @@ def inject_proactive_recommendations(
         ("PA-004", lambda: _pa004(page_results, existing_ids)),
         ("PA-005", lambda: _pa005(page_results, existing_ids)),
         ("PA-006", lambda: _pa006(target_url, http_client, existing_ids, existing_titles)),
+        ("PA-CANONICAL", lambda: _pa_canonical(page_results, existing_ids)),
     ]
 
     seen_titles: set[str] = set()

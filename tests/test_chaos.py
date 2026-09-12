@@ -199,6 +199,7 @@ def run_chaos_suite() -> int:
     passed_cases = 0
     total_cases = 4
 
+    os.environ["ALLOW_PRIVATE_IPS"] = "1"
     try:
         # -------------------------------------------------------------
         # [1/4] Zero-byte page
@@ -320,6 +321,7 @@ def run_chaos_suite() -> int:
     finally:
         httpd.shutdown()
         httpd.server_close()
+        os.environ.pop("ALLOW_PRIVATE_IPS", None)
 
     print("\n------------------------------------------------------------")
     print(f"CHAOS RESULT: {passed_cases}/{total_cases} PASS")

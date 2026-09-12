@@ -94,7 +94,22 @@ DEFAULT_HEADERS: dict = _HTTP_CFG.get(
 )
 KNOWN_AI_CRAWLERS: list[str] = _ROBOTS_CFG.get(
     "known_ai_crawlers",
-    ["GPTBot", "ChatGPT-User", "Google-Extended", "CCBot", "anthropic-ai"],
+    [
+        "GPTBot",
+        "ChatGPT-User",
+        "Google-Extended",
+        "CCBot",
+        "anthropic-ai",
+        "Claude-Web",
+        "PerplexityBot",
+        "Amazonbot",
+        "FacebookBot",
+        "Applebot-Extended",
+        "YouBot",
+        "Omgilibot",
+        "Diffbot",
+        "Bytespider",
+    ],
 )
 PLAYWRIGHT_WAIT_MS: int = int(_RENDER_CFG.get("playwright_wait_ms", 3000))
 PLAYWRIGHT_TIMEOUT_MS: int = int(_RENDER_CFG.get("playwright_timeout_ms", 15000))

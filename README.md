@@ -690,18 +690,19 @@ The repository includes a comprehensive, dual-tier automated test suite confirmi
 The automated `pytest` suite tests unit logic, HTTP security adapters, DNS rebinding defenses, entity corroboration semantics, and international generalization rules with zero external service dependencies:
 
 ```bash
-# Execute the complete automated pytest suite across all 4 collected test modules (56/56 PASS)
+# Execute the complete automated pytest suite across all 5 collected test modules (62/62 PASS)
 python -m pytest tests/ -q
 
 # Or run with verbose per-test reporting
 python -m pytest tests/ -v
 ```
 
-**Collected Test Files & Exact Test Inventory (56/56 Passing)**:
+**Collected Test Files & Exact Test Inventory (62/62 Passing)**:
 - `tests/test_ssrf_hardening.py` (30 tests): Comprehensive IP address classification matrix (IPv4 loopback/private/metadata, IPv6 loopback/link-local/ULA, IPv4-mapped IPv6 normalization), DNS fail-closed handling, mixed public/private DNS rejection, destination IP socket pinning defeating DNS rebinding/TOCTOU, and redirect hop revalidation.
 - `tests/test_generalization.py` (14 tests): TC-004 structural entity disambiguation across culturally diverse/non-English names and dictionary words, TC-002 international address extraction across India, UK, and EU formats with structured PostalAddress parsing and false-positive protections, knowledge graph link verification, and ER-004 deterministic SHA-256 link sampling reproducibility and alphabetical bias elimination.
 - `tests/test_adversarial_hardening.py` (8 tests): Network-level resilience, SSRF and connection refusal aborts, WAF / Cloudflare / Akamai challenge detection, geolocation-gate detection, and bounded wall-clock timeout degradation.
 - `tests/test_claim_corroboration.py` (4 tests): Strict semantic separation between TC-001 (sameAs entity graph), TC-003 (accreditation claim verification via HTTP HEAD), and TC-005 (unverified authority claims), with false-positive regex suppression.
+- `tests/test_render_js.py` (6 tests): Validating real CSR dynamic blanking ratio (`CR-003`), SSRF pre-navigation and mid-navigation route interception (`page.route`), shared 1.0s host rate limiting with HttpClient, resolved network telemetry timings (`responseEnd`), Navigation & Paint performance metrics (FCP/LCP), graceful error degradation, and single-browser process reuse.
 
 ### 8.2 Standalone Integration & Regression Suites
 
@@ -727,7 +728,7 @@ python tests/test_end_to_end.py
 ### Verified Test Results Summary
 
 * **AST Syntax Verification**: All Python source and test files pass Python AST syntax parsing with 0 errors.
-* **Pytest Suite (`python -m pytest tests/`)**: **56/56 PASS** (100% pass rate in ~28s) across 4 collected modules.
+* **Pytest Suite (`python -m pytest tests/`)**: **62/62 PASS** (100% pass rate in ~57s) across 5 collected modules.
 * **Archetype Matrix Validation (`test_archetypes.py`)**: **11/11 PASS** across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML, WAF / Bot-Challenge, Geolocation-Gate).
 * **Adversarial Chaos Suite (`test_chaos.py`)**: **4/4 PASS** across pathological conditions (Zero-byte page, Garbage DOM / JSON-LD, Infinite redirect loop, Hostile TCP blackhole / hang).
 * **JS Rendering Hardening Suite (`test_render_js.py`)**: **100% PASS** validating real CSR blanking ratio (`CR-003`), SSRF route interception, shared 1.0s host rate limiting, Navigation/Paint timing metrics, error degradation, and single-browser process reuse.
@@ -887,6 +888,16 @@ While the audit engine is extensively hardened against real-world production sit
    - *Behavior*: The AI-crawler detection list (`KNOWN_AI_CRAWLERS` in `skills/audit-orchestrator/references/thresholds.json`, consumed by `skills/crawl-render-access/scripts/http_client.py`) is intentionally finite and static for the contest evaluation window. It inspects 14 leading frontier AI bots (`GPTBot`, `ChatGPT-User`, `Google-Extended`, `CCBot`, `anthropic-ai`, `Claude-Web`, `PerplexityBot`, `Amazonbot`, `FacebookBot`, `Applebot-Extended`, `YouBot`, `Omgilibot`, `Diffbot`, `Bytespider`) deterministically without runtime network lookups.
    - *Current Handling*: The AI-crawler detection list is intentionally finite/static and may not recognize newly introduced crawler identities until the list is updated.
    - *Future Work*: Configurable crawler identity lists via environment variables or CLI options.
+
+7. **Regional Address Regex Fallback Coverage**:
+   - *Behavior*: In `trust-entity-corroboration` (`TC-002`), the regex-based plain-text address fallback covers North American, European, and UK postal code formats only.
+   - *Current Handling*: For non-Western international address formats (such as Japanese, Chinese, or GCC P.O. Box formats), the engine relies on Schema.org JSON-LD `PostalAddress` structured data for full international coverage.
+   - *Future Work*: Expand plain-text regex tokenizers with localized heuristic parsers for APAC and Middle Eastern municipal addressing conventions.
+
+8. **Headless Browser SSRF Protection Scope**:
+   - *Behavior*: Headless Chromium (`PlaywrightRenderer`) enforces pre-navigation SSRF destination checks and active `context.route("**/*")` interception to block private/loopback/cloud-metadata IP subrequests and redirects (`route.abort("accessdenied")`). However, because headless Chromium manages its own internal DNS resolution stack rather than routing through Python's `requests`/`urllib3` connection layer, socket-level DNS-pinning (`DestinationPinningManager`) is strictly enforced on the primary `requests`/urllib3 crawler pipeline, and is not injected into Chromium's internal socket layer.
+   - *Current Handling*: All initial navigation URLs and mid-navigation subrequests/redirects are resolved and checked via `is_ssrf_disallowed()`, immediately aborting any access to private networks or metadata services.
+   - *Future Work*: Deploy headless browser instances behind a dedicated local forward-proxy sidecar with socket-level DNS pinning to guarantee DNS rebinding immunity for all browser subresource requests.
 
 ---
 
