@@ -68,12 +68,34 @@ PHONE_RE_PATTERN: str = _ENT.get(
 _PHONE_EXTRACT = re.compile(
     r"(?:\+?\d{1,3}[\s\-\.]?)?\(?\d{2,4}\)?[\s\-\.]?\d{3,4}[\s\-\.]?\d{3,4}"
 )
-_ADDRESS_EXTRACT = re.compile(
-    r"\d{1,5}\s+[\w\s]{3,40}"
-    r"(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct|Suite|Ste)"
-    r"[\w\s,\.#\-]{0,80}",
+# Layered address extractors
+# 1. Commonwealth / US / India Street-First pattern (number/unit, road name, suffix, optional locality/code)
+_ADDR_STREET_FIRST = re.compile(
+    r"\b(?:\d{1,5}[A-Za-z0-9\/\-]*|\b(?:Plot|Unit|Block|Flat|Shop|No\.?)\s+\d{1,5})[,\s]+"
+    r"[\w\s\.\-]{2,40}\b"
+    r"(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct|Suite|Ste|"
+    r"Close|Gardens|Square|Park|Walk|Place|Pl|Crescent|Sector|Marg|Nagar|Colony|Enclave|Bhavan)\b"
+    r"(?:[,\s]+[\w\s,\.\#\-]{2,80})?",
     re.IGNORECASE,
 )
+
+# 2. European Street-Name-First pattern (e.g. Speicherstrasse 55, 60327 Frankfurt am Main)
+_ADDR_EU = re.compile(
+    r"\b(?:[A-Z][\w\s\.\-äöüßéèêàáíóú]{3,40}\s+\d{1,4}[A-Za-z]?)[,\s]+"
+    r"(?:[A-Z]{1,2}[-\s])?\d{4,5}\s+[A-Z][\w\s\.\-äöüßéèêàáíóú]{2,30}"
+    r"(?:[,\s]+[A-Z][\w\s]{2,30})?\b",
+    re.UNICODE,
+)
+
+# 3. UK Postcode address pattern (e.g. 10 Downing Street, London SW1A 2AA)
+_ADDR_UK_POSTCODE = re.compile(
+    r"\b\d{1,5}\s+[\w\s,\.\-]{3,60}[,\s]+[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b"
+    r"(?:[,\s]+(?:United Kingdom|UK|England|Scotland|Wales))?",
+    re.IGNORECASE,
+)
+
+# Backwards-compatibility alias
+_ADDRESS_EXTRACT = _ADDR_STREET_FIRST
 
 # Known authoritative sameAs domains
 _AUTHORITATIVE_DOMAINS = {
@@ -81,14 +103,6 @@ _AUTHORITATIVE_DOMAINS = {
     "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
     "github.com", "bloomberg.com", "bbb.org", "yelp.com",
     "google.com",  # Google Knowledge Panel
-}
-
-# Generic dictionary words that cause brand ambiguity
-_GENERIC_WORDS = {
-    "apple", "amazon", "shell", "mercury", "oracle", "target", "dove",
-    "champion", "delta", "united", "frontier", "prime", "pioneer",
-    "summit", "compass", "crown", "liberty", "eagle", "patriot", "horizon",
-    "atlas", "genesis", "icon", "spark", "nova", "element", "core",
 }
 
 # Authority / certification / partnership claim detection heuristics
@@ -210,6 +224,110 @@ def _similarity(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+
+def _format_postal_address(addr: Any) -> str:
+    """Format a Schema.org PostalAddress dictionary or string into a canonical string."""
+    if isinstance(addr, str):
+        return addr.strip()
+    if not isinstance(addr, dict):
+        return ""
+    street = addr.get("streetAddress", "")
+    locality = addr.get("addressLocality", "")
+    region = addr.get("addressRegion", "")
+    postal_code = addr.get("postalCode", "")
+    country = addr.get("addressCountry", "")
+    if isinstance(country, dict):
+        country = country.get("name", "")
+    parts = [str(p).strip() for p in [street, locality, region, postal_code, country] if p and str(p).strip()]
+    return ", ".join(parts)
+
+
+def _is_kg_entity_link(url: str) -> bool:
+    """Check whether a URL points to an authoritative knowledge-graph node
+    capable of uniquely disambiguating an entity (Wikidata, Wikipedia, Crunchbase)."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lower()
+        # Wikidata entity: e.g. wikidata.org/wiki/Q... or /entity/Q...
+        if "wikidata.org" in host and ("/wiki/q" in path or "/entity/q" in path):
+            return True
+        # Wikipedia article: e.g. en.wikipedia.org/wiki/...
+        if "wikipedia.org" in host and "/wiki/" in path:
+            return True
+        # Crunchbase organization node: crunchbase.com/organization/...
+        if "crunchbase.com" in host and "/organization/" in path:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _has_disambiguating_evidence(block: dict, primary_name: str) -> bool:
+    """Determine whether an Organization block provides sufficient structural
+    evidence to resolve entity ambiguity.
+
+    Evidence sources:
+    1. Knowledge graph identity linkage: sameAs link to Wikidata, Wikipedia, or Crunchbase
+    2. Explicit Schema.org disambiguatingDescription
+    3. Distinct legalName that specifies legal corporate identity
+    4. Physical grounding: structured or non-empty PostalAddress/address
+    5. Temporal grounding: foundingDate
+    6. Formal corporate identity: taxID, vatID, leiCode, duns, or iso6523Code
+    7. Substantive contextual description: description (>= 30 chars) or knowsAbout
+    """
+    if not isinstance(block, dict):
+        return False
+
+    # 1. Knowledge Graph Linkage
+    sameas = block.get("sameAs", [])
+    if isinstance(sameas, str):
+        sameas = [sameas]
+    if isinstance(sameas, list):
+        if any(_is_kg_entity_link(sa) for sa in sameas):
+            return True
+
+    # 2. Schema.org disambiguatingDescription
+    disambig_desc = block.get("disambiguatingDescription")
+    if disambig_desc and isinstance(disambig_desc, str) and len(disambig_desc.strip()) > 5:
+        return True
+
+    # 3. Distinct legalName
+    legal_name = block.get("legalName")
+    if legal_name and isinstance(legal_name, str) and len(legal_name.strip()) > 2:
+        if legal_name.strip().lower() != primary_name.lower():
+            return True
+
+    # 4. Physical grounding: address
+    addr = block.get("address")
+    if isinstance(addr, dict):
+        if any(addr.get(k) for k in ("streetAddress", "addressLocality", "postalCode", "addressCountry", "addressRegion")):
+            return True
+    elif isinstance(addr, str) and len(addr.strip()) > 5:
+        return True
+
+    # 5. Temporal grounding: foundingDate
+    founding = block.get("foundingDate")
+    if founding and str(founding).strip():
+        return True
+
+    # 6. Corporate registry identifiers
+    for reg_id in ("taxID", "vatID", "leiCode", "duns", "iso6523Code"):
+        val = block.get(reg_id)
+        if val and str(val).strip():
+            return True
+
+    # 7. Substantive topical/domain description
+    desc = block.get("description")
+    if desc and isinstance(desc, str) and len(desc.strip()) >= 30:
+        return True
+    if block.get("knowsAbout"):
+        return True
+
+    return False
 
 
 # ===================================================================
@@ -335,26 +453,24 @@ def _check_tc002(
                 continue
             blocks = _extract_jsonld_blocks(pr.soup)
             for block in blocks:
-                if not _is_org_type(_get_types(block)):
-                    continue
-                name = block.get("name", "")
-                if name and isinstance(name, str):
-                    names.append((name.strip(), url))
+                types = _get_types(block)
+                if _is_org_type(types):
+                    name = block.get("name", "")
+                    if name and isinstance(name, str):
+                        names.append((name.strip(), url))
 
-                addr = block.get("address", {})
-                if isinstance(addr, dict):
-                    street = addr.get("streetAddress", "")
-                    locality = addr.get("addressLocality", "")
-                    region = addr.get("addressRegion", "")
-                    addr_str = f"{street}, {locality}, {region}".strip(", ")
+                    addr = block.get("address", {})
+                    addr_str = _format_postal_address(addr)
                     if len(addr_str) > 5:
                         addresses.append((addr_str, url))
-                elif isinstance(addr, str) and len(addr) > 5:
-                    addresses.append((addr, url))
 
-                phone = block.get("telephone", "")
-                if phone and isinstance(phone, str):
-                    phones.append((phone.strip(), url))
+                    phone = block.get("telephone", "")
+                    if phone and isinstance(phone, str):
+                        phones.append((phone.strip(), url))
+                elif any(t.lower() == "postaladdress" for t in types):
+                    addr_str = _format_postal_address(block)
+                    if len(addr_str) > 5:
+                        addresses.append((addr_str, url))
 
         # Extract NAP from visible text (priority pages only)
         for url in priority_urls[:5]:
@@ -369,8 +485,14 @@ def _check_tc002(
                 if len(_normalise_phone(p)) >= 7:
                     phones.append((p.strip(), url))
 
-            # Addresses from text
-            found_addrs = _ADDRESS_EXTRACT.findall(text)
+            # Addresses from text: layered extraction across international patterns
+            found_addrs: list[str] = []
+            for pat in (_ADDR_STREET_FIRST, _ADDR_EU, _ADDR_UK_POSTCODE):
+                for match in pat.finditer(text):
+                    candidate = match.group(0).strip().strip(".,")
+                    if len(candidate) >= 10 and not any(candidate in a for a in found_addrs):
+                        found_addrs.append(candidate)
+
             for a in found_addrs[:3]:
                 addresses.append((a.strip(), url))
 
@@ -658,37 +780,31 @@ def _check_tc004_tc006(
                     if name and isinstance(name, str):
                         brand_names.append(name.strip())
 
-        # TC-004: Check brand name against generic dictionary words
+        # TC-004: Brand entity ambiguity detection via structural evidence
         if brand_names:
-            primary_name = brand_names[0].lower().strip()
-            words = set(primary_name.split())
-            generic_hits = words & _GENERIC_WORDS
+            primary_name = brand_names[0].strip()
 
-            if generic_hits:
-                # Check if disambiguation is present
-                has_disambig = False
-                for block in org_blocks:
-                    if block.get("foundingDate") or block.get("address") or \
-                       block.get("knowsAbout") or block.get("description"):
-                        has_disambig = True
-                        break
+            # Check if disambiguation is present in any Organization block
+            has_disambig = any(
+                _has_disambiguating_evidence(block, primary_name)
+                for block in org_blocks
+            )
 
-                if not has_disambig:
-                    findings.append(_finding(
-                        "TC-004",
-                        "Brand name is ambiguous without disambiguation",
-                        "critical",
-                        f"Brand name '{brand_names[0]}' contains generic "
-                        f"word(s) ({', '.join(generic_hits)}) that collide "
-                        "with common dictionary terms. No JSON-LD "
-                        "disambiguators (foundingDate, address, knowsAbout, "
-                        "description) are present.",
-                        "Add disambiguating properties to your Organization "
-                        "schema: foundingDate, address, knowsAbout, and a "
-                        "detailed description. Consider adding alternateName "
-                        "with your legal/full brand name.",
-                        related=["TC-006"],
-                    ))
+            if not has_disambig:
+                findings.append(_finding(
+                    "TC-004",
+                    "Brand name is ambiguous without disambiguation",
+                    "critical",
+                    f"Brand entity '{primary_name}' lacks unique knowledge "
+                    "graph linkage (Wikidata/Wikipedia sameAs) and provides "
+                    "no structural disambiguation (legalName, disambiguatingDescription, "
+                    "address, foundingDate, or description). AI engines cannot "
+                    "disambiguate this brand from potential entity collisions.",
+                    "Add disambiguating properties to your Organization schema: "
+                    "connect to a Wikidata entity in sameAs, specify legalName, "
+                    "address, foundingDate, and a detailed description.",
+                    related=["TC-006", "TC-001"],
+                ))
 
         # TC-004: Capitalisation variants
         if len(brand_names) >= 2:

@@ -51,7 +51,7 @@ across multiple authoritative sources. This skill audits three pillars:
 | `TC-002` | Inconsistent phone numbers across pages | medium | Multiple conflicting phone numbers detected |
 | `TC-002` | Inconsistent address information across pages | medium | Address discrepancies across crawled pages |
 | `TC-003` | Claimed external partner or accreditation links are broken | high | Outbound verification links for claimed accreditation, certification, or partnership return broken 4xx/5xx HTTP errors |
-| `TC-004` | Brand name is ambiguous without disambiguation | critical | Common dictionary word brand without legalName or disambiguatingDescription |
+| `TC-004` | Brand name is ambiguous without disambiguation | critical | Brand entity lacks external knowledge graph linkage (Wikidata/Wikipedia) and structural disambiguation (legalName, address, foundingDate, or description) |
 | `TC-004` | Brand name appears in too many capitalisation variants | medium | Brand name found in >2 distinct capitalization styles |
 | `TC-005` | Authority or partnership claims lack external verification links | medium | Site presents authority or partnership claims but provides zero verifiable external outbound links |
 | `TC-006` | Organization schema missing disambiguation properties | medium | Organization schema lacks `legalName`, `description`, or identifier |
