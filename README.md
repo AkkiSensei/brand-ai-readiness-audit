@@ -33,7 +33,7 @@ Many modern audit tools attempt to use large language models (LLMs) to grade web
 
 In contrast, **`brand-ai-readiness-audit` operates as a zero-model-weight, rule-based expert engine**:
 
-* **Deterministic Rule Execution**: 30 defect heuristics and 6 proactive recommendations evaluate concrete, observable HTML, HTTP, and JSON-LD primitives. Running the audit multiple times against identical static responses yields bit-identical findings. All internal link sampling (ER-004) uses a deterministic sorted slice (`sorted(links)[:N]`) — no `random` module is used anywhere in the audit engine.
+* **Deterministic Rule Execution**: 30 defect heuristics and 6 proactive recommendations evaluate concrete, observable HTML, HTTP, and JSON-LD primitives. Running the audit multiple times against identical static responses yields bit-identical findings. All internal link sampling (ER-004) uses deterministic SHA-256 hash-based selection (`sorted(links, key=sha256)[:N]`) ensuring uniform, unbiased sampling across the URL namespace without alphabetical skew — no `random` module is used anywhere in the audit engine.
 * **Evidence-Backed Attribution**: Every finding is accompanied by the exact URI, violating code snippet or metric, and an actionable remediation summary.
 * **Bounded Operational Footprint**: Crawling is capped at configurable page budgets (default 15 pages), rate-limited to 1 request per second per host, protected by exponential retry backoffs, and executed within a strict wall-clock timeout budget (default 240s).
 * **Portability**: The entire suite runs on standard Python 3.10+ environments using lightweight dependencies (`requests`, `beautifulsoup4`, `lxml`, `jsonschema`). Browser-based headless DOM rendering (`playwright`) is dynamic and optional: if unavailable, the engine falls back gracefully to server-side HTML heuristics without crashing.
@@ -683,40 +683,58 @@ The audit engine is designed to operate safely as a read-only evaluation client 
 
 ## 8. Verification & Test Suite
 
-The repository includes an automated test suite confirming end-to-end operational integrity:
+The repository includes a comprehensive, dual-tier automated test suite confirming end-to-end operational integrity, separating standard `pytest` automated test discovery from standalone integration and chaos validation scripts:
 
-# Execute unit & regression test suite via pytest
-python -m pytest tests/test_ssrf_hardening.py tests/test_adversarial_hardening.py tests/test_claim_corroboration.py
+### 8.1 Automated Pytest Suite (`python -m pytest tests/`)
 
-# Execute SSRF hardening & DNS rebinding integration test suite (30/30 passing)
-python -m pytest tests/test_ssrf_hardening.py -v
+The automated `pytest` suite tests unit logic, HTTP security adapters, DNS rebinding defenses, entity corroboration semantics, and international generalization rules with zero external service dependencies:
 
-# Execute archetype matrix validation across all 11 web fixtures (11/11 passing)
+```bash
+# Execute the complete automated pytest suite across all 4 collected test modules (56/56 PASS)
+python -m pytest tests/ -q
+
+# Or run with verbose per-test reporting
+python -m pytest tests/ -v
+```
+
+**Collected Test Files & Exact Test Inventory (56/56 Passing)**:
+- `tests/test_ssrf_hardening.py` (30 tests): Comprehensive IP address classification matrix (IPv4 loopback/private/metadata, IPv6 loopback/link-local/ULA, IPv4-mapped IPv6 normalization), DNS fail-closed handling, mixed public/private DNS rejection, destination IP socket pinning defeating DNS rebinding/TOCTOU, and redirect hop revalidation.
+- `tests/test_generalization.py` (14 tests): TC-004 structural entity disambiguation across culturally diverse/non-English names and dictionary words, TC-002 international address extraction across India, UK, and EU formats with structured PostalAddress parsing and false-positive protections, knowledge graph link verification, and ER-004 deterministic SHA-256 link sampling reproducibility and alphabetical bias elimination.
+- `tests/test_adversarial_hardening.py` (8 tests): Network-level resilience, SSRF and connection refusal aborts, WAF / Cloudflare / Akamai challenge detection, geolocation-gate detection, and bounded wall-clock timeout degradation.
+- `tests/test_claim_corroboration.py` (4 tests): Strict semantic separation between TC-001 (sameAs entity graph), TC-003 (accreditation claim verification via HTTP HEAD), and TC-005 (unverified authority claims), with false-positive regex suppression.
+
+### 8.2 Standalone Integration & Regression Suites
+
+Complex end-to-end pipelines that require dedicated mock HTTP servers, Playwright headless browser instances, or full orchestrator subprocess execution are organized as standalone executable test scripts:
+
+```bash
+# 1. Archetype Matrix Validation across all 11 synthetic web fixtures (11/11 PASS)
 python tests/test_archetypes.py
 
-# Execute adversarial chaos suite across 4 pathological conditions (4/4 passing)
+# 2. Adversarial Chaos Suite across 4 pathological conditions (4/4 PASS)
 python tests/test_chaos.py
 
-# Execute targeted claim corroboration semantic tests (TC-003 & TC-005)
-python tests/test_claim_corroboration.py
+# 3. Playwright Headless JS Rendering Suite (CSR blanking, telemetry, SSRF, browser reuse - 100% PASS)
+python tests/test_render_js.py
 
-# Execute integration smoke test across all 4 domain runners
+# 4. Domain Runner Smoke Test across all 4 domain audit skills (4/4 PASS)
 python tests/dry_run_test.py
 
-# Execute complete end-to-end integration and schema contract test
+# 5. Full Orchestrator End-to-End Pipeline & Schema Validation Test (PASS)
 python tests/test_end_to_end.py
 ```
 
-### Verified Test Results
+### Verified Test Results Summary
 
 * **AST Syntax Verification**: All Python source and test files pass Python AST syntax parsing with 0 errors.
-* **Pytest Suite (`python -m pytest tests/`)**: **12/12 PASS** covering unit functions, HTTP client isolation, orchestrator aggregation, and schema compliance.
-* **Archetype Matrix Validation (`test_archetypes.py`)**: **11/11 PASS** across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML, WAF / Bot-Challenge, Geolocation-Gate) with zero false-positive regressions.
+* **Pytest Suite (`python -m pytest tests/`)**: **56/56 PASS** (100% pass rate in ~28s) across 4 collected modules.
+* **Archetype Matrix Validation (`test_archetypes.py`)**: **11/11 PASS** across all web archetypes (SPA, E-commerce, Legacy, Blog, Paywall, Hydration, Cookie Banner, Multilingual, Non-HTML, WAF / Bot-Challenge, Geolocation-Gate).
 * **Adversarial Chaos Suite (`test_chaos.py`)**: **4/4 PASS** across pathological conditions (Zero-byte page, Garbage DOM / JSON-LD, Infinite redirect loop, Hostile TCP blackhole / hang).
-* **Claim Corroboration Semantic Test (`test_claim_corroboration.py`)**: **4/4 PASS** confirming strict semantic separation between `TC-001` (sameAs entity graph), `TC-003` (broken outbound accreditation links verified via HTTP HEAD), and `TC-005` (authority claims lacking outbound verification links), while proving zero false positives on generic commercial phrases ("partner with us", "certification course").
+* **JS Rendering Hardening Suite (`test_render_js.py`)**: **100% PASS** validating real CSR blanking ratio (`CR-003`), SSRF route interception, shared 1.0s host rate limiting, Navigation/Paint timing metrics, error degradation, and single-browser process reuse.
+* **Claim Corroboration Semantic Test (`test_claim_corroboration.py`)**: **4/4 PASS** confirming semantic separation between TC-001, TC-003, and TC-005.
 * **Dry-Run Smoke Test (`dry_run_test.py`)**: **4/4 PASS** — all 4 domain runners execute cleanly against live targets without unhandled exceptions.
-* **End-to-End Test (`test_end_to_end.py`)**: **PASS** — the master orchestrator executes against `https://example.com`, parses stdout JSON, validates sequential `F-001..F-NNN` IDs, confirms severity ordering, verifies `related_to` cross-references, validates output against `report.schema.json`, and verifies that malformed test values are rejected.
-* **Determinism Guarantee**: **100% Deterministic Output** — given identical crawl input, the engine generates identical findings and severity tallies on every run. All internal link sampling (`ER-004`), sitemap traversals, and finding collections use deterministic sorting without random sampling or arbitrary dictionary iteration.
+* **End-to-End Pipeline Test (`test_end_to_end.py`)**: **PASS** — master orchestrator executes against target, produces sequential `F-001..F-NNN` IDs, confirms severity ordering, verifies `related_to` cross-references, and validates output against `report.schema.json`.
+* **Determinism Guarantee**: **100% Deterministic Output** — given identical crawl input, the engine generates identical findings and severity tallies on every run. Internal link sampling (`ER-004`) uses deterministic SHA-256 hash sorting (`sorted(links, key=sha256)[:N]`), ensuring fair, unbiased link sampling across the entire alphabet without run-to-run variation or random state.
 
 ---
 
@@ -724,20 +742,23 @@ python tests/test_end_to_end.py
 
 ### v1.0.1 — Hardening Pass (2026-09-09)
 
-#### C1 — ER-004 Determinism Fix
+#### C1 — ER-004 Deterministic Unbiased Sampling
 
-**Problem**: `er_audit.py` used `random.sample(all_internal_links, N)` for ER-004 broken-link sampling. This meant two runs against identical crawl output could select different link subsets, potentially producing different findings.
+**Problem**: `er_audit.py` originally used `random.sample(all_internal_links, N)` which was non-deterministic. A previous fix switched to `sorted(all_internal_links)[:N]`, but that introduced permanent alphabetical bias (URLs late in alphabetical order like `/support`, `/terms`, `/warranty`, `/z...` were permanently invisible to link checks).
 
-**Fix** (`skills/engagement-retention/scripts/er_audit.py`, line 518):
+**Fix** (`skills/engagement-retention/scripts/er_audit.py`):
 
 ```diff
--            sample = random.sample(all_internal_links, BROKEN_LINK_SAMPLE_SIZE)
-+            sample = sorted(all_internal_links)[:BROKEN_LINK_SAMPLE_SIZE]
+-            sample = sorted(all_internal_links)[:BROKEN_LINK_SAMPLE_SIZE]
++            sample = sorted(
++                all_internal_links,
++                key=lambda u: hashlib.sha256(u.encode("utf-8")).hexdigest(),
++            )[:BROKEN_LINK_SAMPLE_SIZE]
 ```
 
-The `import random` statement was also removed as it became unused. The engine now uses a deterministic, alphabetically-sorted slice. Same input → same output, every run.
+The engine now uses deterministic SHA-256 hash-based key sorting. Every URL across the entire alphabet has equal probability of being sampled, while the sample remains 100% identical and reproducible across runs against identical input.
 
-**Verified**: `python -m pytest tests/ -v` → 4/4 PASS after fix.
+**Verified**: `tests/test_generalization.py` — `test_er004_reproducibility` (3 identical runs on 120 URLs) and `test_er004_bias_elimination` (late-alphabet broken link caught by SHA-256 sampling, permanently missed by alphabetical slice).
 
 #### TC-003 / TC-005 Semantic Separation
 

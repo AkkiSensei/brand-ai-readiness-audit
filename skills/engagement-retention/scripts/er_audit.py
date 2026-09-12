@@ -10,6 +10,7 @@ across the crawl frontier.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -516,10 +517,14 @@ def _check_er004(
         if not all_internal_links:
             return findings
 
-        # Sample up to 25 links deterministically (sorted slice — same input → same output)
+        # Sample up to 25 links deterministically without alphabetical bias
+        # (SHA-256 key ensures uniform distribution across the URL namespace while remaining 100% reproducible)
         sample_size = min(BROKEN_LINK_SAMPLE_SIZE, len(all_internal_links))
         if len(all_internal_links) > BROKEN_LINK_SAMPLE_SIZE:
-            sample = sorted(all_internal_links)[:BROKEN_LINK_SAMPLE_SIZE]
+            sample = sorted(
+                all_internal_links,
+                key=lambda u: hashlib.sha256(u.encode("utf-8")).hexdigest(),
+            )[:BROKEN_LINK_SAMPLE_SIZE]
         else:
             sample = all_internal_links
 

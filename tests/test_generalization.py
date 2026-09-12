@@ -33,7 +33,9 @@ from unittest.mock import MagicMock
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "skills" / "crawl-render-access" / "scripts"))
 sys.path.insert(0, str(_ROOT / "skills" / "trust-entity-corroboration" / "scripts"))
+sys.path.insert(0, str(_ROOT / "skills" / "engagement-retention" / "scripts"))
 
+import hashlib
 from http_client import HttpClient, PageResult
 from tec_audit import (
     _check_tc001,
@@ -46,6 +48,7 @@ from tec_audit import (
     _ADDR_EU,
     _ADDR_UK_POSTCODE,
 )
+from er_audit import _check_er004, BROKEN_LINK_SAMPLE_SIZE
 
 
 # ===========================================================================
@@ -425,9 +428,113 @@ def test_is_kg_entity_link():
     assert _is_kg_entity_link("") is False
 
 
+# ===========================================================================
+# 3. ER-004 DETERMINISTIC LINK SAMPLING & BIAS ELIMINATION
+# ===========================================================================
+
+def test_er004_reproducibility():
+    """ER-004 deterministic sampling reproducibility:
+    1. 120 URLs distributed across letters /a... through /z...
+    2. Sample runs #1, #2, #3 must be 100% identical.
+    3. Late-alphabet URLs (/s..., /t..., /z...) MUST appear in the sample,
+       proving alphabetical bias is eliminated.
+    """
+    urls = [f"https://example.com/{chr(97 + (i % 26))}_section_page_{i:03d}" for i in range(120)]
+    html = "<html><body>" + "".join(f'<a href="{u}">link</a>' for u in urls) + "</body></html>"
+    pr = PageResult(url="https://example.com", status_code=200, soup=BeautifulSoup(html, "html.parser"))
+
+    mock_client = MagicMock()
+    mock_client.head.return_value = MagicMock(status_code=200, error=None)
+
+    # Run 1
+    mock_client.reset_mock()
+    _check_er004(["https://example.com"], {"https://example.com": pr}, mock_client, "https://example.com")
+    run1_calls = [c[0][0] for c in mock_client.head.call_args_list]
+
+    # Run 2
+    mock_client.reset_mock()
+    _check_er004(["https://example.com"], {"https://example.com": pr}, mock_client, "https://example.com")
+    run2_calls = [c[0][0] for c in mock_client.head.call_args_list]
+
+    # Run 3
+    mock_client.reset_mock()
+    _check_er004(["https://example.com"], {"https://example.com": pr}, mock_client, "https://example.com")
+    run3_calls = [c[0][0] for c in mock_client.head.call_args_list]
+
+    # Evidence 1: Identical across all three runs
+    assert run1_calls == run2_calls, "Run 1 and Run 2 differ!"
+    assert run2_calls == run3_calls, "Run 2 and Run 3 differ!"
+    assert len(run1_calls) == BROKEN_LINK_SAMPLE_SIZE, f"Expected sample size {BROKEN_LINK_SAMPLE_SIZE}, got {len(run1_calls)}"
+
+    # Evidence 2: Late-alphabet URLs (/s.. through /z..) are present
+    late_urls = [u for u in run1_calls if u.split("/")[-1].split("_")[0] in "stuvwxyz"]
+    assert len(late_urls) >= 3, f"Expected late-alphabet URLs in sample, got {late_urls}"
+
+
+def test_er004_bias_elimination():
+    """ER-004 bias elimination proof:
+    Under old strategy: sorted(all_internal_links)[:25] selects exclusively the
+    first 25 URLs alphabetically (/a... to /c...). Any broken links late in the
+    alphabet (/support, /terms, /warranty, /z...) are permanently missed.
+
+    Under new SHA-256 key strategy:
+    URLs across the entire alphabet have uniform opportunity to be sampled.
+    When broken links exist among late-alphabet pages, the new strategy samples
+    them and fires ER-004, whereas the old alphabetical strategy permanently misses them.
+    """
+    all_urls = [f"https://example.com/{chr(97 + (i % 26))}_item_{i:03d}" for i in range(100)]
+
+    # Compute samples under old vs new strategy
+    old_strategy_sample = sorted(all_urls)[:BROKEN_LINK_SAMPLE_SIZE]
+    new_strategy_sample = sorted(
+        all_urls, key=lambda u: hashlib.sha256(u.encode("utf-8")).hexdigest()
+    )[:BROKEN_LINK_SAMPLE_SIZE]
+
+    # Prove old strategy only selects early alphabet (letters a, b, c, d, e)
+    old_letters = set(u.split("/")[-1][0] for u in old_strategy_sample)
+    assert max(old_letters) <= "g", f"Old strategy selected surprisingly late letters: {old_letters}"
+
+    # Prove new strategy covers wide range of the alphabet including s..z
+    new_letters = set(u.split("/")[-1][0] for u in new_strategy_sample)
+    assert any(letter in "stuvwxyz" for letter in new_letters), f"New strategy missing late letters: {new_letters}"
+
+    # Pick a URL that is in new_strategy_sample but NOT in old_strategy_sample
+    broken_candidate = [
+        u for u in new_strategy_sample
+        if u not in old_strategy_sample and u.split("/")[-1][0] in "stuvwxyz"
+    ][0]
+
+    html = "<html><body>" + "".join(f'<a href="{u}">link</a>' for u in all_urls) + "</body></html>"
+    pr = PageResult(url="https://example.com", status_code=200, soup=BeautifulSoup(html, "html.parser"))
+
+    # Mock HTTP client: return 404 for broken_candidate, 200 for all others
+    mock_client = MagicMock()
+    def mock_head(url):
+        if url == broken_candidate:
+            return MagicMock(status_code=404, error=None)
+        return MagicMock(status_code=200, error=None)
+    mock_client.head.side_effect = mock_head
+
+    # Run audit with new strategy
+    findings = _check_er004(
+        ["https://example.com"],
+        {"https://example.com": pr},
+        mock_client,
+        "https://example.com",
+    )
+
+    # ER-004 should be found because broken_candidate was sampled
+    er004_findings = [f for f in findings if f.get("local_id") == "ER-004"]
+    assert len(er004_findings) == 1, "Expected ER-004 finding under new SHA-256 sampling"
+    assert broken_candidate in er004_findings[0]["evidence"]
+
+    # Prove old strategy would have completely missed it
+    assert broken_candidate not in old_strategy_sample
+
+
 if __name__ == "__main__":
     print("=" * 60)
-    print("RUNNING P1 GENERALIZATION TESTS")
+    print("RUNNING GENERALIZATION & ER-004 SAMPLING TESTS")
     print("=" * 60)
     test_tc004_case_a_unambiguous_names_not_in_old_dictionary_fire()
     print("PASS: TC-004 Case A (Names not in old dictionary fire without disambiguation)")
@@ -453,6 +560,10 @@ if __name__ == "__main__":
     print("PASS: TC-002 False-positive protection (SKUs, IDs, phones, prices, dates rejected)")
     test_is_kg_entity_link()
     print("PASS: Knowledge graph linkage helper (_is_kg_entity_link)")
+    test_er004_reproducibility()
+    print("PASS: ER-004 Reproducibility (Runs #1, #2, #3 identical across 120 URLs; late-alphabet sampled)")
+    test_er004_bias_elimination()
+    print("PASS: ER-004 Bias Elimination (Late-alphabet broken link caught by SHA-256; missed by sorted slice)")
     print("=" * 60)
-    print("ALL GENERALIZATION TESTS PASSED SUCCESSFULLY")
+    print("ALL GENERALIZATION & ER-004 TESTS PASSED SUCCESSFULLY")
     print("=" * 60)
