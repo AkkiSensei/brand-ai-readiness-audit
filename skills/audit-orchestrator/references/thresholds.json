@@ -22,6 +22,11 @@
     "max_depth": 3,
     "allowed_schemes": ["http", "https"],
     "sitemap_max_urls": 500,
+    "sitemap_max_doc_bytes": 1048576,
+    "sitemap_max_cumulative_bytes": 5242880,
+    "sitemap_max_docs": 25,
+    "max_links_per_page": 200,
+    "max_queue_size": 500,
     "disallow_extensions": [
       ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
       ".mp4", ".mp3", ".zip", ".gz", ".tar", ".woff", ".woff2",
@@ -36,7 +41,9 @@
     "playwright_wait_ms": 3000,
     "playwright_viewport_width": 1280,
     "playwright_viewport_height": 800,
-    "playwright_timeout_ms": 15000
+    "playwright_timeout_ms": 15000,
+    "max_browser_requests_per_page": 150,
+    "max_browser_redirects": 5
   },
 
   "robots": {
