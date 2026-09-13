@@ -98,7 +98,11 @@ _CTA_RE = re.compile(
     r"(buy|shop|order|subscribe|sign\s*up|get\s+started|try\s+free|"
     r"choose|select|purchase|plans|pricing|trial|upgrade|continue|explore|view|"
     r"add\s+to\s+cart|book\s+now|contact\s+us|learn\s+more|"
-    r"request\s+a?\s*demo|start\s+free|download|enroll)",
+    r"request\s+a?\s*demo|start\s+free|download|enroll|"
+    r"comprar|suscrib|registr|empezar|probar|contacto|planes|precios|"
+    r"kaufen|anmelden|starten|jetzt|testen|kontakt|preise|"
+    r"acheter|inscri|commencer|essayer|tarifs|"
+    r"acquist|inizia|prova|contatt|começar)",
     re.IGNORECASE,
 )
 
@@ -108,9 +112,18 @@ def _extract_jsonld_blocks(soup: Any) -> list[dict]:
     if soup is None:
         return blocks
     for script in soup.find_all("script", type="application/ld+json"):
-        raw = script.string
+        raw = (script.string or script.get_text() or "").strip()
         if not raw:
             continue
+        # Strip CDATA and HTML/JS comment wrappers commonly used by CMSs
+        if raw.startswith("<!--") and raw.endswith("-->"):
+            raw = raw[4:-3].strip()
+        if raw.startswith("//<![CDATA[") and raw.endswith("//]]>"):
+            raw = raw[11:-5].strip()
+        elif raw.startswith("/*<![CDATA[*/") and raw.endswith("/*]]>*/"):
+            raw = raw[13:-7].strip()
+        elif raw.startswith("<![CDATA[") and raw.endswith("]]>"):
+            raw = raw[9:-3].strip()
         try:
             data = json.loads(raw)
             if isinstance(data, list):
@@ -275,6 +288,16 @@ def _check_er001(
                             break
 
                 if not has_nav:
+                    for class_nav in pr.soup.find_all(attrs={"class": re.compile(r"\b(?:navbar|nav-links|site-nav|main-nav|primary-nav|site-menu)\b", re.I)}):
+                        links = [
+                            el for el in class_nav.find_all(["a", "button"])
+                            if el.get_text(strip=True) or el.get("aria-label") or el.get("title")
+                        ]
+                        if len(links) >= NAV_MIN_LINKS:
+                            has_nav = True
+                            break
+
+                if not has_nav:
                     missing_nav.append(url)
 
         if missing_h1:
@@ -366,12 +389,16 @@ def _check_er002(
                         has_breadcrumb = True
                         break
 
-            # Check for any element with breadcrumb class/role
+            # Check for any element with breadcrumb class/role or Microdata
             if not has_breadcrumb:
                 bc_elem = pr.soup.find(
-                    attrs={"class": re.compile(r"breadcrumb", re.I)}
+                    attrs={"class": re.compile(r"breadcrumb|fil[-_]?d[-_]?ariane|brotkrumen|migas", re.I)}
                 ) or pr.soup.find(
-                    attrs={"role": "navigation", "aria-label": re.compile(r"breadcrumb", re.I)}
+                    attrs={"role": "navigation", "aria-label": re.compile(r"breadcrumb|fil[-_]?d[-_]?ariane|brotkrumen|migas", re.I)}
+                ) or pr.soup.find(
+                    attrs={"itemtype": re.compile(r"BreadcrumbList", re.I)}
+                ) or pr.soup.find(
+                    attrs={"itemprop": re.compile(r"itemListElement", re.I)}
                 )
                 if bc_elem:
                     has_breadcrumb = True
@@ -649,7 +676,8 @@ def _check_er005(
             is_product_like = any(
                 seg in lower
                 for seg in ("/product", "/service", "/pricing", "/plan",
-                            "/demo", "/trial", "/shop", "/store", "/offer")
+                            "/demo", "/trial", "/shop", "/store", "/offer",
+                            "/preise", "/tarifs", "/precios", "/productos", "/produkte")
             )
 
             # Also detect via JSON-LD Product type
@@ -843,7 +871,8 @@ def _check_er008(
             for inp in pr.soup.find_all("input"):
                 aria = (inp.get("aria-label") or "").lower()
                 placeholder = (inp.get("placeholder") or "").lower()
-                if "search" in aria or "search" in placeholder:
+                if re.search(r"search|buscar|suche|recherch|pesquis|cerca", aria) or \
+                   re.search(r"search|buscar|suche|recherch|pesquis|cerca", placeholder):
                     has_search = True
                     break
             if has_search:

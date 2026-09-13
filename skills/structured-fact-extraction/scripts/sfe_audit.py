@@ -120,9 +120,18 @@ def _extract_jsonld_blocks(soup: Any) -> list[dict]:
     if soup is None:
         return blocks
     for script in soup.find_all("script", type="application/ld+json"):
-        raw = script.string
+        raw = (script.string or script.get_text() or "").strip()
         if not raw:
             continue
+        # Strip CDATA and HTML/JS comment wrappers commonly used by CMSs
+        if raw.startswith("<!--") and raw.endswith("-->"):
+            raw = raw[4:-3].strip()
+        if raw.startswith("//<![CDATA[") and raw.endswith("//]]>"):
+            raw = raw[11:-5].strip()
+        elif raw.startswith("/*<![CDATA[*/") and raw.endswith("/*]]>*/"):
+            raw = raw[13:-7].strip()
+        elif raw.startswith("<![CDATA[") and raw.endswith("]]>"):
+            raw = raw[9:-3].strip()
         try:
             data = json.loads(raw)
             if isinstance(data, list):
