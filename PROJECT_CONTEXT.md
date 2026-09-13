@@ -9,26 +9,27 @@
 ## 1. Problem Framing: The Paradigm Shift in Web Discovery
 
 ### 1.1 From Lexical Search to Generative Ingestion
-Over the past two decades, web discoverability was governed by keyword-centric Search Engine Optimization (SEO). In traditional search architectures, crawlers parsed HTML to build inverted indices; algorithms such as PageRank and BM25 matched user queries against document keywords to rank a list of ten blue links. Human users clicked these links, loaded pages in browsers, and manually resolved ambiguities, missing data, or confusing layouts.
 
-Modern AI search and generative answer engines—including **ChatGPT (SearchGPT)**, **Claude**, **Perplexity**, **Google Gemini**, and **Microsoft Copilot**—operate under fundamentally different technical constraints:
+Over the past two decades, web discoverability was governed by keyword-centric SEO. Traditional crawlers built inverted indices; algorithms such as PageRank and BM25 matched queries against document keywords to rank lists of URLs. Human users clicked those URLs, loaded pages in browsers, and manually resolved ambiguities.
+
+Modern AI search and generative answer engines — **ChatGPT (SearchGPT)**, **Claude**, **Perplexity**, **Google Gemini**, and **Microsoft Copilot** — operate under fundamentally different technical constraints:
 
 $$\text{Search Ranking} \neq \text{Machine Ingestion Quality} \neq \text{Citation Readiness}$$
 
-Generative engines do not merely catalog URLs for human evaluation. They deploy automated agents that:
+Generative engines deploy automated agents that:
 1. Fetch and segment web content into discrete context chunks.
 2. Ingest structured facts into knowledge graphs to establish entity veracity.
 3. Cross-corroborate factual assertions against independent third-party sources.
-4. Synthesize conversational responses while dynamically attaching verifiable citation anchors.
+4. Synthesize conversational responses with dynamically attached, verifiable citation anchors.
 
-When an AI engine cannot reliably fetch, extract, or corroborate information from a brand website, the brand suffers from **AI Hallucination**, **Entity Confusion**, or complete **Omission** from generative answers.
+When an AI engine cannot reliably fetch, extract, or corroborate information from a brand website, the brand suffers **AI Hallucination**, **Entity Confusion**, or complete **Omission** from generative answers.
 
 ### 1.2 The Four Ingestion Barriers
-A brand website faces four distinct structural barriers when interacting with AI retrieval pipelines:
-- **Crawler Gatekeeping**: Many websites unintentionally disallow AI user-agents (`GPTBot`, `Claude-Web`, `PerplexityBot`, `Google-Extended`) in `robots.txt`, present Cloudflare/Akamai bot challenges, or serve empty client-side rendering (CSR) application shells that headless fetchers cannot execute.
-- **Data Entrapment**: Critical commercial facts (pricing, specifications, return policies, executive leadership) are frequently trapped inside raster images (`<img>` without descriptive alt text), HTML5 `<canvas>` elements, or unindexed binary PDF downloads.
-- **Entity Ambiguity**: Absence of Schema.org JSON-LD linked data or missing `sameAs` entity URI links (to Wikidata, Wikipedia, Crunchbase, or official social profiles) prevents knowledge graph extractors from establishing high-confidence entity resolution.
-- **Passage Fragmentation**: Documents lacking hierarchical heading structures (`<h1>` through `<h3>`), anchorable fragment IDs (`#section-name`), or inverted-pyramid declarative summaries cannot be cleanly extracted for targeted citations.
+
+- **Crawler Gatekeeping**: Many websites unintentionally disallow AI user-agents (`GPTBot`, `Claude-Web`, `PerplexityBot`, `Google-Extended`) in `robots.txt`, or present WAF challenges / empty CSR shells that headless fetchers cannot execute.
+- **Data Entrapment**: Critical commercial facts (pricing, specs, policies) are trapped inside raster `<img>` tags without alt text, `<canvas>` elements, or unindexed binary PDFs.
+- **Entity Ambiguity**: Absence of Schema.org JSON-LD or missing `sameAs` entity URIs (Wikidata, Wikipedia, LinkedIn) prevents knowledge-graph extractors from establishing high-confidence entity resolution.
+- **Passage Fragmentation**: Documents lacking hierarchical heading structures (`<h1>`..`<h3>`), anchorable fragment IDs, or inverted-pyramid declarative summaries cannot be cleanly extracted for targeted citations.
 
 ---
 
@@ -41,11 +42,13 @@ brand-ai-readiness-audit/
 ├── marketplace.json                  # Marketplace manifest declaring all 5 skills & entrypoint
 ├── README.md                         # Primary user and judge entrypoint
 ├── PROJECT_CONTEXT.md                # Substantive technical context & architecture spec
+├── PROJECT_DESCRIPTION.md            # Concise problem/solution description
+├── CONTEXT.md                        # Engineering history & empirical ground truth
 ├── requirements.txt                  # Pinned runtime dependencies
 ├── pytest.ini                        # Pytest configuration
 ├── skills/
 │   ├── audit-orchestrator/           # Designated entrypoint skill
-│   │   ├── SKILL.md                  # Specification & agent instructions
+│   │   ├── SKILL.md
 │   │   ├── scripts/
 │   │   │   ├── aggregate.py          # Master CLI orchestrator & composition engine
 │   │   │   ├── proactive_engine.py   # Proactive recommendations generator
@@ -70,15 +73,14 @@ brand-ai-readiness-audit/
 │       ├── SKILL.md
 │       └── scripts/
 │           └── er_audit.py           # Document hierarchy, overlays, CTAs, & links
-└── tests/                            # Automated regression & validation test suites
+└── tests/                            # Automated regression & validation test suites (274 tests)
 ```
 
 ### 2.1 Single Designated Entrypoint
+
 `marketplace.json` defines exactly one entrypoint:
 ```json
-{
-  "entrypoint": "skills/audit-orchestrator/scripts/aggregate.py"
-}
+{ "entrypoint": "skills/audit-orchestrator/scripts/aggregate.py" }
 ```
 All multi-skill execution, inter-skill data passing, error boundary handling, and output formatting flow through `aggregate.py`.
 
@@ -88,82 +90,98 @@ All multi-skill execution, inter-skill data passing, error boundary handling, an
 
 The audit suite evaluates **30 core defect heuristics** and **7 proactive recommendations** across five distinct skills:
 
-| Skill Identifier | Scope & Heuristics | Key Technical Checks |
+| Skill | Heuristics | Key Technical Checks |
 |---|---|---|
-| **`crawl-render-access`** | `CR-001` .. `CR-008` | • **`CR-001`**: AI bot permissions in `robots.txt` (`GPTBot`, `Claude-Web`, etc.)<br>• **`CR-002`**: WAF/bot challenge blocking & HTTP transport errors<br>• **`CR-003`**: Client-Side Rendering (CSR) text-blanking ratio (>80% missing without JS)<br>• **`CR-004`**: HTTP status code validation (4xx, 5xx failures)<br>• **`CR-005`**: Unbroken redirect chains & cyclic redirection<br>• **`CR-006`**: XML sitemap existence, `robots.txt` declaration, & size bounds<br>• **`CR-007`**: Sitemap content freshness (`<lastmod>` declarations)<br>• **`CR-008`**: Conflicting `noindex` / `none` meta robots directives |
-| **`structured-fact-extraction`** | `SF-001` .. `SF-008` | • **`SF-001`**: Schema.org JSON-LD presence & syntax validity<br>• **`SF-002`**: `Organization` schema completeness (`name`, `url`, `logo`, `contactPoint`)<br>• **`SF-003`**: `Product` / `Offer` schema completeness (pricing, availability, currency)<br>• **`SF-004`**: Commercial facts trapped in raster images (`<img>` missing alt text)<br>• **`SF-005`**: Content trapped in uncaptioned `<canvas>` or `<video>` elements<br>• **`SF-006`**: Standalone / orphaned binary PDF documents lacking HTML counterparts<br>• **`SF-007`**: Content freshness & temporal currency (`dateModified`, `datePublished`)<br>• **`SF-008`**: Structured FAQ / Q&A markup (`FAQPage`, `Question`, `AcceptedAnswer`) |
-| **`trust-entity-corroboration`** | `TC-001` .. `TC-006` | • **`TC-001`**: Authoritative `sameAs` entity links (Wikidata, Wikipedia, LinkedIn)<br>• **`TC-002`**: Name, Address, Phone (NAP) multi-page consistency & drift detection<br>• **`TC-003`**: Outbound accreditation, certifier, & regulatory partner link verification<br>• **`TC-004`**: Entity name ambiguity (generic names without disambiguating context)<br>• **`TC-005`**: Transparent editorial, authorship, or organizational ownership signals<br>• **`TC-006`**: Machine-readable licensing, copyright, & reuse declarations |
-| **`engagement-retention`** | `ER-001` .. `ER-008` | • **`ER-001`**: Semantic heading hierarchy (prominent `<h1>`, strict order)<br>• **`ER-002`**: Intrusive full-page modal overlays & interstitials blocking content<br>• **`ER-003`**: Primary `<nav>` navigation structure & accessibility<br>• **`ER-004`**: Deterministically sampled internal link health & dead-link ratio<br>• **`ER-005`**: Primary call-to-action (CTA) button presence & clarity<br>• **`ER-006`**: Responsive mobile viewport declaration (`width=device-width`)<br>• **`ER-007`**: Cookie consent banner compliance & non-blocking execution<br>• **`ER-008`**: Cumulative Layout Shift (CLS) risk elements (unsized media assets) |
-| **`audit-orchestrator`** | Composition & Proactive (`PA-001` .. `PA-006`, `PA-CANONICAL`) | • Multi-skill sequencing, frontier dispatch, and bounded execution<br>• Finding deduplication, global ID assignment (`F-001` .. `F-NNN`)<br>• Remediation theme synthesis and priority sorting<br>• Proactive recommendation generation (`/llms.txt`, unified `@graph`, heading slugs)<br>• JSON Schema Draft-07 compliance validation |
+| **`crawl-render-access`** | `CR-001`..`CR-008` | AI bot permissions in `robots.txt` • WAF/bot challenge detection • CSR text-blanking ratio • HTTP status codes • Redirect chain depth • XML sitemap presence & declaration • Sitemap `<lastmod>` freshness • Conflicting `noindex` directives |
+| **`structured-fact-extraction`** | `SF-001`..`SF-008` | Schema.org JSON-LD presence & syntax • `Organization` schema completeness • `Product`/`Offer` schema completeness • Commercial facts in images without alt text • Uncaptioned `<canvas>`/`<video>` • Orphan binary PDFs • Content freshness (`dateModified`) • FAQ/Q&A markup (`FAQPage`) |
+| **`trust-entity-corroboration`** | `TC-001`..`TC-006` | Authoritative `sameAs` entity links • NAP multi-page consistency • Outbound accreditation link verification • Entity name ambiguity • Transparent authorship/ownership signals • Machine-readable licensing declarations |
+| **`engagement-retention`** | `ER-001`..`ER-008` | Semantic heading hierarchy • Intrusive modal overlay detection • Primary `<nav>` structure • SHA-256-sampled internal link health • CTA presence & clarity • Responsive mobile viewport • Cookie consent banner compliance • CLS-risk unsized media assets |
+| **`audit-orchestrator`** | Composition + `PA-001`..`PA-006`, `PA-CANONICAL` | Multi-skill sequencing & frontier dispatch • Finding deduplication & global ID assignment • Remediation theme synthesis • Proactive recommendation generation • JSON Schema Draft-07 validation |
 
 ---
 
-## 4. End-to-End Causal Audit Flow
+## 4. End-to-End Causal Audit Pipeline
 
-The audit executes as a linear, causally-gated pipeline. The design recognizes that an AI ingestion pipeline is fundamentally hierarchical: if a lower layer fails, higher layers cannot function.
+The audit executes as a linear, causally-gated pipeline. AI ingestion is fundamentally hierarchical: if a lower layer fails, higher layers cannot function.
 
 ```
-                             [Target URL Input]
-                                     │
-                                     ▼
-                     ┌───────────────────────────────┐
-                     │   HttpClient Transport Init   │
-                     │  • SSRF Address Validation    │
-                     │  • Socket-Level DNS Pinning   │
-                     │  • Monotonic Deadline Clock   │
-                     └───────────────┬───────────────┘
-                                     │
-                                     ▼
-                     ┌───────────────────────────────┐
-                     │      Crawl-Render-Access      │
-                     │  • Fetch & Parse robots.txt   │
-                     │  • Discover XML Sitemaps      │
-                     │  • Seed BFS Crawl Frontier    │
-                     └───────────────┬───────────────┘
-                                     │
-               ┌─────────────────────┴─────────────────────┐
-         [Fatal Blocker?]                            [Access Permitted]
-               │                                           │
-               ▼                                           ▼
-   ┌───────────────────────┐                 ┌───────────────────────────┐
-   │ Short-Circuit Exit    │                 │   Bounded Frontier Crawl  │
-   │ Status: "blocked"     │                 │   (Max 15 pages, 1 req/s) │
-   │ Schema-Valid JSON     │                 └─────────────┬─────────────┘
-   └───────────────────────┘                               │
-                                                           ▼
-                                             ┌───────────────────────────┐
-                                             │ Parallel Sub-Skill Run    │
-                                             │ • structured-fact-extract │
-                                             │ • trust-entity-corroborat │
-                                             │ • engagement-retention    │
-                                             └─────────────┬─────────────┘
-                                                           │
-                                                           ▼
-                                             ┌───────────────────────────┐
-                                             │ Canonical Merge & Dedup   │
-                                             │ • Assign F-001 .. F-NNN   │
-                                             │ • Group Remediation Theme │
-                                             │ • Synthesize Proactive    │
-                                             └─────────────┬─────────────┘
-                                                           │
-                                                           ▼
-                                             ┌───────────────────────────┐
-                                             │ JSON Schema Verification  │
-                                             │ • Draft-07 report.schema  │
-                                             └─────────────┬─────────────┘
-                                                           │
-                                                           ▼
-                                                  [Final JSON Report]
+                         [Target URL Input]
+                                 │
+                                 ▼
+                 ┌───────────────────────────────┐
+                 │   HttpClient Transport Init   │
+                 │  • SSRF Address Validation    │
+                 │  • Socket-Level DNS Pinning   │
+                 │  • Monotonic Deadline Clock   │
+                 └───────────────┬───────────────┘
+                                 │
+                                 ▼
+                 ┌───────────────────────────────┐
+                 │      Crawl-Render-Access      │
+                 │  • Fetch & Parse robots.txt   │
+                 │  • Discover XML Sitemaps      │
+                 │  • Seed BFS Crawl Frontier    │
+                 └───────────────┬───────────────┘
+                                 │
+              ┌──────────────────┴──────────────────┐
+        [Fatal Blocker?]                    [Access Permitted]
+              │                                      │
+              ▼                                      ▼
+  ┌─────────────────────┐           ┌────────────────────────────┐
+  │ Short-Circuit Exit  │           │   Bounded Frontier Crawl   │
+  │ status: "blocked"   │           │   (default max 15 pages,   │
+  │ Schema-Valid JSON   │           │    rate-limited 1 req/s)   │
+  └─────────────────────┘           └────────────────┬───────────┘
+                                                      │
+                                                      ▼
+                                        ┌─────────────────────────┐
+                                        │  Parallel Sub-Skill Run  │
+                                        │  • structured-fact-extr. │
+                                        │  • trust-entity-corrobor.│
+                                        │  • engagement-retention  │
+                                        └─────────────┬───────────┘
+                                                      │
+                                                      ▼
+                                        ┌─────────────────────────┐
+                                        │ Canonical Merge & Dedup  │
+                                        │ • Assign F-001..F-NNN    │
+                                        │ • Group Remediation Theme│
+                                        │ • Synthesize Proactive   │
+                                        └─────────────┬───────────┘
+                                                      │
+                                                      ▼
+                                        ┌─────────────────────────┐
+                                        │  JSON Schema Validation  │
+                                        │  Draft-07 report.schema  │
+                                        └─────────────┬───────────┘
+                                                      │
+                                                      ▼
+                                               [Final JSON Report]
 ```
 
 ### 4.1 Short-Circuit Semantics
-If the target host completely disallows crawling via `robots.txt`, returns a permanent 403 WAF challenge, or attempts an illegal SSRF connection to an internal network, the orchestrator short-circuits execution. Rather than crashing or running empty downstream skills, it emits a schema-valid report with `audit_status: "blocked"`, documenting the blocker with full evidence.
+
+If the target host completely disallows crawling via `robots.txt`, returns a 403 WAF challenge, or triggers an SSRF block (e.g., DNS resolves to a private IP), the orchestrator short-circuits execution. Rather than crashing or running empty downstream skills, it emits a schema-valid report with `audit_status: "blocked"` and `blocked_reason`, documenting the blocker with full evidence.
+
+### 4.2 Single Network Pass
+
+`crawl-render-access` executes network discovery and populates in-memory `PageResult` objects (pre-parsed BeautifulSoup DOMs). Downstream skills analyze these pre-parsed objects entirely in memory — zero redundant network round-trips.
 
 ---
 
-## 5. Finding, Evidence, and Remediation Contract
+## 5. Deterministic Finding Model
 
-Every defect emitted by the marketplace adheres to a strict, unambiguous semantic contract:
+Every finding produced by the marketplace is **100% deterministic**: running the audit against identical server responses produces bit-identical finding sets. This is enforced by:
+
+- **Rule-based heuristics only**: no LLM prompts, no random sampling, no probabilistic scoring.
+- **SHA-256 link sampling**: internal URL selection in ER-004 uses `sorted(links, key=sha256_digest)[:N]`, guaranteeing uniform URL-space coverage with perfect reproducibility.
+- **Identical deduplication key**: findings are deduplicated by `(local_id, title[:120])`, producing stable merged findings across multi-page runs.
+
+---
+
+## 6. Evidence Model
+
+Every finding carries a non-empty `evidence` field containing a verbatim, verifiable observation extracted directly from the HTTP response or DOM:
 
 ```json
 {
@@ -174,7 +192,7 @@ Every defect emitted by the marketplace adheres to a strict, unambiguous semanti
   "category": "facts",
   "evidence": "Found 3 images containing pricing, specification, or credential keywords without descriptive alt attributes: /assets/pricing-table.png",
   "location": "https://example.com/products",
-  "why_it_matters": "AI crawlers and multimodal LLMs cannot reliably extract text from images without alt text, leading to omitted product pricing and specifications in AI answers.",
+  "why_it_matters": "AI crawlers cannot reliably extract text from images without alt text, leading to omitted product pricing in AI answers.",
   "remediation_theme": "Trapped Content Remediation",
   "suggested_action": {
     "summary": "Provide descriptive alt text for images containing critical brand data, or render specifications in semantic HTML tables.",
@@ -187,113 +205,156 @@ Every defect emitted by the marketplace adheres to a strict, unambiguous semanti
 }
 ```
 
-### 5.1 The Remediation Theme Abstraction
-Rather than leaving site owners with an unstructured list of isolated warnings, the orchestrator clusters findings into **Remediation Themes** (e.g., *Crawler & Transport Infrastructure*, *Schema.org Structured Data*, *Trapped Content Remediation*, *Entity Authority & Corroboration*, *Document Presentation & Accessibility*). Each theme defines a singular primary action and priority, allowing engineering teams to resolve multiple findings simultaneously.
+Optional fields include:
+- **`confidence`** (`0.0`–`1.0`): computed as `pages_affected / pages_checked` for multi-page checks.
+- **`pages_affected`**: count of pages where the finding was detected.
+- **`sample_urls`**: a representative list of affected page URLs.
 
 ---
 
-## 6. Proactive AI-Readiness Recommendations Model
+## 7. Remediation Model
 
-Traditional website linters are purely reactive: they only complain when standard HTML specifications are breached. The Brand AI-Readiness marketplace introduces a dedicated **Proactive Recommendation Engine** (`PA-001` .. `PA-006`, `PA-CANONICAL`) that advises brands on forward-looking standards designed specifically for generative AI:
+Rather than leaving site owners with an unstructured list of isolated warnings, the orchestrator clusters findings into **Remediation Themes** — groups with a single primary action and priority:
 
-1. **`PA-001` — Machine-Readable Site Manifest (`/llms.txt` or `/agents.md`)**:
-   Recommends deploying an `/llms.txt` markdown manifest at the domain root, providing AI agents with an authoritative, token-efficient table of contents of core brand documentation.
-2. **`PA-002` — Unified Schema.org `@graph` Architecture**:
-   Recommends consolidating scattered JSON-LD snippets into a single cohesive `@graph` structure with `@id` cross-references linking `Organization` $\to$ `Product` $\to$ `Offer` $\to$ `Person`.
-3. **`PA-003` — Heading Slug Deep-Linking (`id` Fragment Anchors)**:
-   Recommends attaching deterministic `id` slugs to all `<h2>` and `<h3>` tags (e.g., `<h2 id="pricing-tiers">`), enabling AI answer engines to deep-link users directly to cited paragraphs.
-4. **`PA-004` — Inverted-Pyramid Declarative Summaries**:
-   Recommends structuring introductory article passages with answer-first summaries, maximizing the likelihood of passage extraction during RAG retrieval.
-5. **`PA-005` — Syndication Feeds for Freshness Tracking**:
-   Recommends exposing RSS/Atom feeds so LLM ingestion systems can detect content updates without expensive polling crawls.
-6. **`PA-006` — Explicit AI Crawler Allow Directives**:
-   Recommends explicitly declaring `User-agent: GPTBot` and `User-agent: Claude-Web` with `Allow: /` in `robots.txt` to remove ambiguity.
-7. **`PA-CANONICAL` — Canonical URL Consolidation**:
-   Recommends declaring `<link rel="canonical">` tags on all crawled pages to prevent index dilution across URL variations.
+| Theme | Related Checks |
+|---|---|
+| Crawler Access Governance | CR-001, CR-002, CR-006, CR-007 |
+| Render Architecture | CR-003, CR-004, CR-005 |
+| Schema.org Structured Data | SF-001, SF-002, SF-003, SF-008 |
+| Trapped Content Remediation | SF-004, SF-005, SF-006 |
+| Content Freshness | SF-007, CR-007 |
+| Entity Authority & Corroboration | TC-001, TC-002, TC-003, TC-004, TC-005, TC-006 |
+| Document Presentation & Accessibility | ER-001, ER-002, ER-003, ER-004, ER-005, ER-006, ER-007, ER-008 |
+
+Engineering teams can resolve all findings within a theme with a single coordinated sprint rather than working through an undifferentiated alert list.
 
 ---
 
-## 7. Security Boundaries & Operational Guarantees
+## 8. Proactive Recommendation Model
 
-The marketplace is engineered with strict production defense-in-depth principles:
+Traditional linters are purely reactive. The Brand AI-Readiness marketplace introduces a dedicated **Proactive Recommendation Engine** that advises brands on forward-looking standards for generative AI:
 
-### 7.1 Strictly Read-Only & Recommend-Only
-- Zero state mutations: the tool **never** performs HTTP POST, PUT, PATCH, or DELETE requests.
-- Never fills out or submits forms.
+1. **`PA-001` — Machine-Readable Site Manifest (`/llms.txt` or `/agents.md`)**: Deploys an authoritative, token-efficient AI site manifest at the domain root.
+2. **`PA-002` — Unified Schema.org `@graph` Architecture**: Consolidates scattered JSON-LD into a single `@graph` with `@id` cross-references linking `Organization` → `Product` → `Offer` → `Person`.
+3. **`PA-003` — Heading Slug Deep-Linking**: Adds deterministic `id` slugs to `<h2>` and `<h3>` tags, enabling AI engines to deep-link directly to cited paragraphs.
+4. **`PA-004` — Inverted-Pyramid Declarative Summaries**: Structures article intros with answer-first summaries, maximizing passage extraction during RAG retrieval.
+5. **`PA-005` — Syndication Feeds for Freshness Tracking**: Exposes RSS/Atom feeds so LLM ingestion systems can detect content updates without expensive polling crawls.
+6. **`PA-006` — Explicit AI Crawler Allow Directives**: Declares explicit `Allow: /` for verified AI crawlers in `robots.txt` to remove ambiguity.
+7. **`PA-CANONICAL` — Canonical URL Consolidation**: Declares `<link rel="canonical">` tags on all pages to prevent index dilution across URL variations.
+
+---
+
+## 9. Security & Network Boundaries
+
+The marketplace is engineered with strict production defense-in-depth principles.
+
+### 9.1 Strictly Read-Only
+
+- Zero state mutations: never `POST`, `PUT`, `PATCH`, or `DELETE`.
+- Never fills or submits forms.
 - Never modifies shopping carts or session cookies.
-- Never attempts administrative login, brute-force, or authentication bypass.
+- Never attempts administrative login or authentication bypass.
 
-### 7.2 SSRF Protection & Private Network Fencing
-Before any network connection is opened, the target URL and all subsequent redirect locations are validated against prohibited IP address ranges:
-- Loopback addresses (`127.0.0.0/8`, `::1`)
-- Private RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
-- Link-local subnets (`169.254.0.0/16`, `fe80::/10`)
-- Cloud instance metadata endpoints (`169.254.169.254`, `metadata.google.internal`, etc.)
-- Prohibited schemes: only `http://` and `https://` are permitted (`file://`, `gopher://`, `dict://` rejected).
+### 9.2 SSRF Protection & Private Network Fencing
 
-### 7.3 Socket-Level DNS Pinning (TOCTOU Immunity)
-Standard application-level SSRF checks suffer from Time-Of-Check to Time-Of-Use (TOCTOU) vulnerabilities: an attacker-controlled DNS server can return a public IP during pre-flight validation and resolve to `127.0.0.1` milliseconds later when the HTTP socket connects.
+Before any network connection, the target URL and all redirect destinations are validated against prohibited IP ranges:
+- Loopback: `127.0.0.0/8`, `::1`
+- RFC 1918 private subnets: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+- Link-local: `169.254.0.0/16`, `fe80::/10`
+- Cloud metadata endpoints: `169.254.169.254`, `metadata.google.internal`
+- Scheme allowlist: only `http://` and `https://` permitted (`file://`, `gopher://`, `dict://` rejected)
 
-This marketplace neutralizes DNS rebinding via `DestinationPinningManager` integrated into an `SSRFSafeHTTPAdapter`:
+### 9.3 Socket-Level DNS Pinning (TOCTOU Immunity)
+
+Standard application-level SSRF checks suffer from Time-Of-Check to Time-Of-Use (TOCTOU) race conditions: an attacker-controlled DNS server can return a public IP during pre-flight validation but resolve to `127.0.0.1` milliseconds later when the socket connects.
+
+`DestinationPinningManager` integrated into `SSRFSafeHTTPAdapter` neutralizes this:
 1. DNS resolution occurs once during pre-flight validation.
 2. The resolved IP is verified against SSRF blocklists.
-3. The underlying socket connection is explicitly bound to that pre-validated IP address using custom connection pooling.
+3. The underlying socket connection is explicitly bound to the pre-validated IP.
 4. Any mid-session rebinding attempt fails immediately.
 
-### 7.4 Monotonic Global Deadline Enforcement
-To guarantee compliance with execution budget constraints (e.g., standard 5-minute timeout), the orchestrator initializes an authoritative monotonic clock (`AuditDeadline`). All crawl iterations, browser renders, sub-skill dispatches, and XML parsing steps decrement from this budget. If the budget is exhausted, the engine cleanly halts further requests and compiles a valid report from gathered observations.
+### 9.4 Monotonic Global Deadline Enforcement
+
+The orchestrator initializes an `AuditDeadline` (default 240 s) using a monotonic clock. All crawl iterations, browser renders, sub-skill dispatches, and XML parsing steps decrement from this budget. If the budget is exhausted, the engine cleanly halts and emits a valid partial report (`audit_status: "partial"`, `blocked_reason: "timeout_budget_exhausted"`).
+
+### 9.5 Rate Limiting
+
+A token-bucket `RateLimiter` enforces a maximum of 1 request/second per host, preventing inadvertent load on target servers.
 
 ---
 
-## 8. Generalization Strategy: Patterns Over Fit-To-Examples
+## 10. Generalization Strategy
 
-The marketplace is intentionally architected to audit **arbitrary, unseen public websites** rather than overfitting to specific studied domains.
+The marketplace evaluates **arbitrary, unseen public websites** by assessing structural patterns rather than overfitting to specific domains.
 
-### 8.1 Evaluated Archetypes
-The engine has been formally verified against 11 synthetic and live website archetypes:
-1. **Single-Page Applications (SPA)**: Heavy client-side JavaScript applications requiring hydration measurement.
-2. **E-Commerce Catalogues**: Product variations, nested Schema.org `Offer` hierarchies, and dynamic stock states.
-3. **Legacy HTML Portals**: Nested `<table>` layouts, missing heading semantics, and font tags.
-4. **Editorial & Media Blogs**: Long-form articles, author attributions, and inverted-pyramid passages.
-5. **Paywalled & Metered Content**: Gated content detection and schema-level paywall declarations (`isAccessibleForFree`).
-6. **Hydration & Dynamic DOMs**: Sites that inject JSON-LD post-load via client scripts.
-7. **Cookie & Privacy Overlays**: Intrusive full-screen modals obscuring primary content.
-8. **Internationalized Sites (i18n)**: Multi-language alternate links and regional URL structures.
-9. **WAF & Rate-Challenged Sites**: Detecting Cloudflare/Akamai blocking without crashing.
-10. **Geo-Gated Gateways**: Handling location redirects and language landing gates.
-11. **Non-HTML & Malformed Assets**: Graceful handling of binary streams, zero-byte responses, and malformed markup.
+### 10.1 Evaluated Archetypes (11 Total)
 
-### 8.2 Deterministic Link Sampling
-When auditing large domains, link evaluation (ER-004) samples internal URLs deterministically using SHA-256 hashing (`sorted(links, key=sha256)[:N]`). This guarantees unbiased, uniform distribution across the URL space while ensuring bit-identical reproducibility across runs without relying on random number generators.
+The engine is verified against 11 synthetic and live website archetypes:
+
+| # | Archetype | Key Checks Exercised |
+|---|---|---|
+| 1 | Single-Page Applications (SPA) | CR-003 (CSR blanking), render_confidence |
+| 2 | E-Commerce Catalogues | SF-003 (Product/Offer schema), SF-004 |
+| 3 | Legacy HTML Portals | ER-001 (heading hierarchy), SF-001 |
+| 4 | Editorial & Media Blogs | PA-003, PA-004, SF-007 |
+| 5 | Paywalled & Metered Content | `isAccessibleForFree` schema |
+| 6 | Hydration & Dynamic DOMs | CR-003, CR-004 |
+| 7 | Cookie & Privacy Overlays | ER-002 (modal detection) |
+| 8 | Internationalized Sites (i18n) | Multi-language alternate links |
+| 9 | WAF & Rate-Challenged Sites | CR-002, blocked status |
+| 10 | Geo-Gated Gateways | CR-005, location-gate heuristics |
+| 11 | Non-HTML & Malformed Assets | Graceful degradation |
+
+### 10.2 Deterministic SHA-256 Link Sampling
+
+When auditing large domains, link evaluation (ER-004) samples internal URLs deterministically:
+```python
+sorted(links, key=lambda u: hashlib.sha256(u.encode()).digest())[:N]
+```
+This guarantees unbiased uniform URL-space coverage and bit-identical reproducibility without RNG state.
+
+### 10.3 Degradation Resilience
+
+If Playwright headless rendering is unavailable, the engine automatically falls back to static HTML heuristics. If a sub-skill crashes unexpectedly, the orchestrator catches the exception, logs it, and continues with remaining skills — emitting a partial but schema-valid report.
 
 ---
 
-## 9. Non-Goals and Technical Limitations
+## 11. Limitations
 
-To maintain absolute reliability and safety, the system explicitly defines its non-goals:
-- **Zero Neural Weights**: The engine does **not** download or run multi-gigabyte LLM weights (e.g., Llama, Mistral) locally. It relies on deterministic parsing, AST analysis, and schema validation.
-- **No Active Exploitation**: The engine is an audit tool, not a penetration test suite. It will not attempt to exploit discovered vulnerabilities.
-- **No Captcha/Paywall Bypassing**: The engine respects site security boundaries and reports access blocks rather than attempting circumvention.
-- **Network-Dependent External Verification**: Accreditation link validation (TC-003) uses safe HTTP HEAD requests. Unreachable or slow third-party partner servers are handled with short timeouts (3s) and will degrade gracefully to avoid delaying the main audit.
+An honest appraisal of current system boundaries:
+
+1. **Headless browser dependency**: `PlaywrightRenderer` requires Chromium binaries. Without them, CSR blanking measurements fall back to static heuristics, which cannot evaluate runtime JavaScript rendering.
+2. **Active edge tarpit traversal**: When CDNs (e.g., Akamai on gucci.com) enforce TLS tarpitting or TCP packet drops, the engine correctly protects itself via read timeouts (8 s) and aborts cleanly. It does not attempt CAPTCHA bypass by design.
+3. **External claim verification sampling**: TC-003 rate-limits external HEAD requests to a maximum of 5 unique authority URLs per audit to prevent crawl explosion.
+4. **Sitemap traversal ceiling**: Sitemap index child sitemaps are capped at 10 child sitemaps and 500 total URLs (`sitemap_max_urls`) to preserve bounded runtime.
+5. **No authenticated access**: Pages behind login walls or paywalls are not audited beyond the gate detection heuristic.
 
 ---
 
-## 10. Compliance Matrix: Adobe University Hackathon Round 3
+## 12. Non-Goals
 
-| Official Requirement | Brief Specification | Marketplace Implementation | Compliance Status |
+- **No neural weights**: The engine never downloads or runs LLM weights locally. All analysis is deterministic rule-based parsing.
+- **No active exploitation**: An audit tool, not a penetration testing suite.
+- **No CAPTCHA or paywall bypass**: Respects site security boundaries; reports access blocks rather than attempting circumvention.
+
+---
+
+## 13. Adobe Round 3 Compliance Matrix
+
+| Requirement | Specification | Implementation | Status |
 |---|---|---|---|
-| **Marketplace Root Structure** | Compliant directory structure with `marketplace.json` | Clean root layout containing `marketplace.json`, `README.md`, `PROJECT_CONTEXT.md`, and 5 skill directories. | **FULL PASS** |
-| **Manifest Completeness** | All skills declared, valid JSON | `marketplace.json` strictly declares `name`, `version`, `entrypoint`, and all 5 skills with exact paths. | **FULL PASS** |
-| **Designated Entrypoint** | Exactly ONE designated entrypoint | Exactly one entrypoint defined: `skills/audit-orchestrator/scripts/aggregate.py`. | **FULL PASS** |
-| **Agent Skills SKILL.md** | Spec-compliant SKILL.md files | Every skill includes a `SKILL.md` with YAML frontmatter, name, description, Inputs, Procedure, and Output. | **FULL PASS** |
-| **Recommend-Only / Read-Only** | No state mutation or destructive actions | Purely passive inspection; zero POST/PUT/DELETE, zero form submissions, zero authenticated operations. | **FULL PASS** |
-| **Robots.txt Respect** | Obey RFC 9309 crawler standards | Full RFC 9309 parser, honors disallow directives for AI bots, fail-closed on 5xx errors. | **FULL PASS** |
-| **Self-Contained & Portable** | Standard dependencies, no proprietary lock-in | Standard Python 3.10+, pinned `requirements.txt`, no proprietary model APIs required. | **FULL PASS** |
-| **Execution Budget** | Under stated wall-clock ceiling (<5 min) | Monotonic `AuditDeadline` enforcement; typical audits complete in 4–15 seconds. | **FULL PASS** |
-| **Package Archive Size** | Submission ZIP $\le$ 50 MB | Final ZIP size is **0.21 MB** (~222 KB), representing less than 0.5% of the allowable limit. | **FULL PASS** |
-| **No Pretrained Weights** | Zero model weight files | 100% deterministic rule-based analysis; zero model binary files (.bin, .onnx, .safetensors). | **FULL PASS** |
-| **Schema-Validated Report** | Validated against formal JSON Schema | Emitted report strictly validates against JSON Schema Draft-07 (`report.schema.json`). | **FULL PASS** |
-| **Evidence & Severity** | Every finding has severity, evidence, action | 100% of findings include finding ID, category, severity, evidence, suggested action, and priority. | **FULL PASS** |
-| **Proactive Suggestions** | Forward-looking AI recommendations | Dedicated proactive engine producing `/llms.txt`, unified `@graph`, heading slugs, and AI allow guidance. | **FULL PASS** |
-| **Skill Composition** | Genuine multi-skill orchestration | Entrypoint dynamically coordinates crawl frontier, parallel sub-skill runs, and deduplication. | **FULL PASS** |
-| **Unseen Generalization** | Generalized rules, not fit-to-examples | Verified across 11 synthetic archetypes, 4 chaos scenarios, and arbitrary public URLs. | **FULL PASS** |
+| Marketplace Root Structure | Compliant directory + `marketplace.json` | Clean root layout with all 5 skill directories | **PASS** |
+| Manifest Completeness | All skills declared, valid JSON | `marketplace.json` declares name, version, entrypoint, all 5 skills | **PASS** |
+| Designated Entrypoint | Exactly one entrypoint | `skills/audit-orchestrator/scripts/aggregate.py` | **PASS** |
+| SKILL.md Files | YAML frontmatter, inputs, procedure, output | All 5 skills include compliant `SKILL.md` | **PASS** |
+| Recommend-Only / Read-Only | No state mutation | Zero POST/PUT/DELETE; no form submissions | **PASS** |
+| robots.txt Respect | Obey RFC 9309 | Full RFC 9309 parser; fail-closed on 5xx | **PASS** |
+| Self-Contained & Portable | Standard deps, no proprietary lock-in | Python 3.10+, pinned `requirements.txt`, no proprietary APIs | **PASS** |
+| Execution Budget | Under wall-clock ceiling | Monotonic `AuditDeadline` (default 240 s); typical runs 4–15 s | **PASS** |
+| No Pretrained Weights | Zero model weight files | 100% deterministic rule-based analysis | **PASS** |
+| Schema-Validated Report | Validated against JSON Schema | Emitted report validates against `report.schema.json` (Draft-07) | **PASS** |
+| Evidence & Severity | Every finding has severity, evidence, action | 100% of findings include ID, severity, evidence, suggested_action | **PASS** |
+| Proactive Suggestions | Forward-looking AI recommendations | Dedicated engine: PA-001..PA-006, PA-CANONICAL | **PASS** |
+| Skill Composition | Genuine multi-skill orchestration | Entrypoint coordinates crawl frontier, parallel sub-skill runs, dedup | **PASS** |
+| Unseen Generalization | Generalized rules, not fit-to-examples | Verified across 11 archetypes, 4 chaos scenarios, live URLs | **PASS** |

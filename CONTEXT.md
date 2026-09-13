@@ -1,6 +1,6 @@
 # Project Development Context & Historical Architecture Log
 
-> **Purpose**: This document is the comprehensive source of truth for any developer or AI agent starting cold on this repository. It reconstructs the project's entire engineering trajectory from `git log` and codebase evolution, explaining not only what the system does, but *why* specific design choices, bug fixes, and hardening decisions were made.
+> **Purpose**: This document is the engineering history log for this repository. It records *why* specific design choices, hardening decisions, and bug fixes were made, grounded in commit history (`git log`) and real-site empirical testing. It is intentionally distinct from `PROJECT_CONTEXT.md`, which is the forward-facing technical specification. Read this document when debugging unexpected behavior, tracing a design decision to its origin, or understanding the evolution of edge-case handling.
 
 ---
 
