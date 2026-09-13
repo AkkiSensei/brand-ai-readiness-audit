@@ -686,8 +686,9 @@ _CHALLENGE_TITLE_RE = re.compile(
     r"^\s*(?:checking|challenge|security\s+check|please\s+wait|attention\s+required|"
     r"ddos\s+protection|verif(?:y|ying|ication)|access\s+denied|one\s+more\s+step|"
     r"just\s+a\s+moment|human\s+verification|bot\s+check|browser\s+check|"
-    r"are\s+you\s+a\s+(?:human|robot)|captcha|loading\.\.\.|enable\s+javascript|"
-    r"site\s+is\s+protected|service\s+unavailable|ray\s+id|under\s+attack)\s*$",
+    r"are\s+you\s+a\s+(?:human|robot)|captcha|loading|enable\s+javascript|"
+    r"site\s+is\s+protected|service\s+unavailable|ray\s+id|under\s+attack)"
+    r"(?:[.\s!?:…|–-].*)?$",
     re.IGNORECASE,
 )
 
@@ -722,9 +723,14 @@ def detect_challenge_page(
 
     Returns:
         (is_challenge, confidence, signals_list)
-        - is_challenge: True if ≥ CHALLENGE_MIN_SIGNALS triggered
+        - is_challenge: True if ≥ CHALLENGE_MIN_SIGNALS triggered AND a mandatory
+          content-intent anchor (challenge title or body text) is also present
         - confidence: float 0.0–1.0 proportional to signal count
         - signals_list: human-readable list of which signals fired
+
+    IMPORTANT: This function NEVER mutates the passed soup object.
+    All text extraction is performed on the raw html string to preserve
+    the caller's soup for downstream word-count and DOM checks.
     """
     signals: list[str] = []
 
@@ -735,6 +741,7 @@ def detect_challenge_page(
     html_lower = html_text.lower()
 
     # ── Signal 1: Generic/challenge page title ───────────────────────────────
+    # Read-only: uses soup.find() which never mutates.
     title_text = ""
     if soup is not None:
         title_tag = soup.find("title")
@@ -748,31 +755,43 @@ def detect_challenge_page(
     if title_text and _CHALLENGE_TITLE_RE.match(title_text):
         signals.append(f"challenge_title:{title_text[:80]!r}")
 
-    # ── Signal 2: Script-dominant structure (scripts >> visible text) ─────────
-    script_bytes = sum(len(s.get_text() or "") for s in soup.find_all("script")) if soup else 0
-    visible_text = ""
-    if soup is not None:
-        # Remove script and style tags before getting text
-        for tag in soup.find_all(["script", "style", "noscript"]):
-            tag.decompose()
-        visible_text = soup.get_text(separator=" ", strip=True)
-        # Rebuild soup is expensive; we work with the text we extracted
-    else:
-        # Strip tags from raw HTML for rough estimate
-        visible_text = re.sub(r"<[^>]+>", " ", html_text)
-        visible_text = re.sub(r"\s+", " ", visible_text).strip()
+    # ── Signals 2 & 3: Script-dominant structure + low content density ────────
+    # CRITICAL: compute entirely from raw HTML strings — NEVER call decompose()
+    # on the passed soup, which would permanently mutate the caller's PageResult.
+    #
+    # Extract script content bytes via regex on raw html.
+    script_bytes = sum(
+        len(m.group(1) or "")
+        for m in re.finditer(
+            r"<script(?:\s[^>]*)?>([^<]*(?:<(?!/script>)[^<]*)*)</script>",
+            html_text,
+            re.IGNORECASE | re.DOTALL,
+        )
+    )
+
+    # Build visible text by stripping all HTML tags from the raw string.
+    # This is semantically equivalent to soup.get_text() after decomposing
+    # script/style/noscript — but without touching the soup object.
+    _tag_strip_re = re.compile(
+        r"<(?:script|style|noscript)(?:\s[^>]*)?>.*?</(?:script|style|noscript)>",
+        re.IGNORECASE | re.DOTALL,
+    )
+    bare_html = _tag_strip_re.sub(" ", html_text)
+    bare_html = re.sub(r"<[^>]+>", " ", bare_html)
+    visible_text = re.sub(r"\s+", " ", bare_html).strip()
 
     visible_word_count = len(visible_text.split())
-    # Script-dominant: total script content is much larger than visible text
+
+    # Script-dominant: total script content is much larger than visible text.
     if script_bytes > 0 and script_bytes > max(300, visible_word_count * 8):
         signals.append(f"script_dominant:script={script_bytes}B visible_words={visible_word_count}")
 
-    # ── Signal 3: Very low meaningful content density ────────────────────────
-    # A real page has some meaningful text. Challenge shells have near-zero.
+    # Very low meaningful content density — challenge shells have near-zero.
     if visible_word_count < 30:
         signals.append(f"low_content_density:words={visible_word_count}")
 
     # ── Signal 4: Absence of semantic content elements ───────────────────────
+    # Read-only: soup.find() never mutates.
     if soup is not None:
         has_h1 = bool(soup.find("h1"))
         has_p = bool(soup.find("p"))
@@ -781,11 +800,9 @@ def detect_challenge_page(
         if not has_h1 and not has_p and not has_article:
             signals.append("no_semantic_elements:missing_h1_p_article")
         if not has_nav and not has_h1:
-            # Combined absence of nav + h1 is a strong signal (real pages have at least one)
             if "no_semantic_elements:missing_h1_p_article" not in signals:
                 signals.append("no_nav_no_h1")
     else:
-        # Simple check on raw HTML
         if not re.search(r"<(?:h1|article|main|section|nav)[>\s]", html_lower):
             signals.append("no_semantic_elements_raw")
 
@@ -794,15 +811,16 @@ def detect_challenge_page(
         signals.append("challenge_body_text_pattern")
 
     # ── Signal 6: Noscript-only meaningful content (JS-gate pattern) ─────────
+    # Read-only: soup.find_all("noscript") never mutates.
     if soup is not None:
         noscript_tags = soup.find_all("noscript")
         noscript_text = " ".join((t.get_text() or "") for t in noscript_tags)
         noscript_words = len(noscript_text.split())
-        # If noscript has more words than visible content, page is JS-gated
         if noscript_words > 5 and noscript_words >= visible_word_count:
             signals.append(f"noscript_dominant:noscript_words={noscript_words}")
 
-    # ── Signal 7: Hidden-only form (typical challenge challenge token) ─────────
+    # ── Signal 7: Hidden-only form (typical challenge token submission) ────────
+    # Read-only: soup.find_all("form") never mutates.
     if soup is not None:
         all_forms = soup.find_all("form")
         for form in all_forms:
@@ -819,6 +837,7 @@ def detect_challenge_page(
                 break
 
     # ── Signal 8: Zero or near-zero visible links ─────────────────────────────
+    # Read-only: soup.find_all("a") never mutates.
     if soup is not None:
         link_count = len(soup.find_all("a", href=True))
         if link_count == 0:
@@ -829,20 +848,21 @@ def detect_challenge_page(
     signal_count = len(signals)
     confidence = min(1.0, signal_count / max(1, CHALLENGE_MIN_SIGNALS + 2))
 
-    # Safety gate: structural-absence signals alone are not sufficient to classify
-    # a page as a challenge. At least one "content-intent" signal must fire:
-    # challenge title, challenge body text, script dominance, hidden form, or
-    # noscript dominance. This prevents legitimate empty SPA shells, maintenance
-    # pages, and thin-content pages from being misclassified.
-    _STRUCTURAL_ABSENCE_SIGNALS = frozenset({
-        "low_content_density", "no_semantic_elements", "no_nav_no_h1",
-        "no_semantic_elements_raw", "zero_visible_links", "zero_visible_links_raw",
-    })
-    has_content_intent_signal = any(
-        not any(sig.startswith(s) for s in _STRUCTURAL_ABSENCE_SIGNALS)
+    # Safety gate — two requirements must BOTH be met:
+    #
+    # 1. Quantity gate: ≥ CHALLENGE_MIN_SIGNALS total signals fired.
+    # 2. Mandatory content-intent anchor: Signal 1 (challenge_title) OR
+    #    Signal 5 (challenge_body_text_pattern) must be present.
+    #
+    # This two-lock design prevents legitimate SPA shells and thin pages from
+    # being misclassified. A real SPA bundle has lots of script bytes and may
+    # have no semantic elements — but it does NOT have a challenge-titled page
+    # or challenge body text. Only actual bot-protection pages carry those.
+    has_mandatory_anchor = any(
+        sig.startswith("challenge_title") or sig == "challenge_body_text_pattern"
         for sig in signals
     )
-    is_challenge = signal_count >= CHALLENGE_MIN_SIGNALS and has_content_intent_signal
+    is_challenge = signal_count >= CHALLENGE_MIN_SIGNALS and has_mandatory_anchor
 
     if is_challenge:
         logger.debug(
