@@ -54,7 +54,7 @@ Target URL
 
 ### 2.2 Key Architectural Tenets
 * **Single Network Pass**: `crawl-render-access` executes network discovery and populates in-memory `PageResult` objects with parsed DOMs (`BeautifulSoup`). Downstream skills analyze these pre-parsed objects in memory—zero redundant network round-trips.
-* **Deterministic Rule Execution**: Reject ungrounded LLM prompting in the audit loop. All heuristics evaluate concrete HTTP, HTML, and JSON-LD primitives. Running the audit multiple times against identical content produces bit-identical findings.
+* **Deterministic Rule Execution**: Reject ungrounded LLM prompting in the audit loop. All heuristics evaluate concrete HTTP, HTML, and JSON-LD primitives. Running the audit multiple times against identical content produces deterministic, identical findings.
 * **Bounded Operational Footprint**: Enforces strict per-host rate limiting (1.0 req/s), maximum page budget (default 15), maximum response size (5 MB), and global wall-clock timeout budgets (default 240s).
 
 ---

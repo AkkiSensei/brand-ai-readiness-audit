@@ -1549,6 +1549,21 @@ class PlaywrightRenderer:
         self._limiter = rate_limiter
         self._robots = robots_cache
         self.deadline = deadline
+        self._pin_manager = pin_manager  # Fix: was dropped in __init__, causing AttributeError in intercept_route
+        # Fix: session was accepted but never stored, causing AttributeError in intercept_route
+        if session is not None:
+            self._session = session
+            self._owns_session = False
+        else:
+            # Build a minimal SSRF-safe session for route interception fetch calls
+            self._session = requests.Session()
+            self._owns_session = True
+            adapter = SSRFSafeHTTPAdapter(
+                pin_manager=self._pin_manager,
+                allow_private_ips=self._allow_private_ips,
+            )
+            self._session.mount("http://", adapter)
+            self._session.mount("https://", adapter)
         self._playwright = None
         self._browser = None
         self._available = self._check_availability()
@@ -2102,7 +2117,7 @@ class PlaywrightRenderer:
         return result
 
     def close(self) -> None:
-        """Shut down the Playwright browser."""
+        """Shut down the Playwright browser and release owned resources."""
         with self._lock:
             try:
                 if self._browser:
@@ -2116,6 +2131,18 @@ class PlaywrightRenderer:
                     self._playwright = None
             except Exception:
                 pass
+            # Close the session only if we created it (not if an external session was passed)
+            if getattr(self, "_owns_session", False):
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
+
+    def set_deadline(self, deadline: Optional[AuditDeadline]) -> None:
+        """Update or establish the authoritative deadline for rendering operations."""
+        self.deadline = deadline
+        if self._robots is not None and hasattr(self._robots, "set_deadline"):
+            self._robots.set_deadline(deadline)
 
     def __enter__(self) -> "PlaywrightRenderer":
         return self

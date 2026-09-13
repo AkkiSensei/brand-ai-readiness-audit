@@ -66,7 +66,9 @@ a `SkillCoverage` dict.
 | `CR-002` | Excessive redirect chains detected | low | Redirect chain length > 2 hops or redirect loop |
 | `CR-003` | Severe CSR text blanking — content invisible to non-JS crawlers | critical | Raw HTML text ratio < 0.15 or empty SPA shell |
 | `CR-004` | Moderate CSR text blanking — reduced content in raw HTML | high | Text ratio between 0.15 and 0.30 |
+| `CR-005` | Geolocation or location-selection gate blocking catalog content | high | Geolocation/pincode selection required before content renders |
 | `CR-005` | Paywall or login overlay detected blocking content | high | Overlay / paywall obscures main body content |
+| `CR-005` | Full-viewport overlay detected blocking content | high | Full-viewport fixed/absolute modal obscuring initial view |
 | `CR-006` | No XML sitemap found | high | No sitemap at standard locations or in robots.txt |
 | `CR-006` | Sitemap not declared in robots.txt | medium | Sitemap exists but not referenced in robots.txt |
 | `CR-007` | Sitemap entries missing `<lastmod>` dates | medium | >30% of sitemap URLs lack `<lastmod>` |

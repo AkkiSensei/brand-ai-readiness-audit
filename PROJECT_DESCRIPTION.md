@@ -14,7 +14,7 @@ The system is a **five-skill marketplace** adhering to the `agentskills.io` stan
 
 ## Key Differentiators
 
-**Deterministic rule engine** — 30 defect heuristics and 7 proactive signals evaluate observable web primitives (HTTP headers, `robots.txt` AI-bot policies, DOM text ratios, Schema.org graphs, viewport tags) without non-deterministic LLM grading. Running against identical server responses produces bit-identical reports.
+**Deterministic rule engine** — 30 defect heuristics and 7 proactive signals evaluate observable web primitives (HTTP headers, `robots.txt` AI-bot policies, DOM text ratios, Schema.org graphs, viewport tags) without non-deterministic LLM grading. Running against identical server responses produces deterministic, repeatable finding sets, severities, evidence, and remediation plans (excluding run timestamps and duration metadata).
 
 **Zero model weights** — No multi-gigabyte local model files. No third-party LLM API keys. The submission archive is self-contained and lightweight, relying on standard Python parsing libraries.
 

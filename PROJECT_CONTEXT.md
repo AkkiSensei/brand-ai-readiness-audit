@@ -171,7 +171,7 @@ If the target host completely disallows crawling via `robots.txt`, returns a 403
 
 ## 5. Deterministic Finding Model
 
-Every finding produced by the marketplace is **100% deterministic**: running the audit against identical server responses produces bit-identical finding sets. This is enforced by:
+Every finding produced by the marketplace is **100% deterministic**: running the audit against identical server responses produces identical finding sets, IDs, severities, and evidence. This is enforced by:
 
 - **Rule-based heuristics only**: no LLM prompts, no random sampling, no probabilistic scoring.
 - **SHA-256 link sampling**: internal URL selection in ER-004 uses `sorted(links, key=sha256_digest)[:N]`, guaranteeing uniform URL-space coverage with perfect reproducibility.
@@ -312,7 +312,7 @@ When auditing large domains, link evaluation (ER-004) samples internal URLs dete
 ```python
 sorted(links, key=lambda u: hashlib.sha256(u.encode()).digest())[:N]
 ```
-This guarantees unbiased uniform URL-space coverage and bit-identical reproducibility without RNG state.
+This guarantees unbiased uniform URL-space coverage and deterministic reproducibility without RNG state.
 
 ### 10.3 Degradation Resilience
 

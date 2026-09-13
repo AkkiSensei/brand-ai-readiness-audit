@@ -20,7 +20,7 @@ This marketplace autonomously inspects any public brand website, evaluates **30 
 
 | Dimension | Typical Approach | This Marketplace |
 |---|---|---|
-| **Determinism** | Non-deterministic LLM grading | **100% deterministic** rule-based analysis; identical inputs → identical reports |
+| **Determinism** | Non-deterministic LLM grading | **100% deterministic** rule-based analysis; identical inputs → identical findings |
 | **Model footprint** | Gigabytes of weights or costly API keys | **Zero model weights**; pure Python rules |
 | **Execution speed** | 60–180 s due to API latency | **Sub-15 s** typical; global 240 s hard deadline |
 | **Security posture** | Blind HTTP fetchers | **SSRF-hardened** + socket-level DNS pinning |
