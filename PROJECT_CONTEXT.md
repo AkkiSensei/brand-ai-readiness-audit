@@ -171,7 +171,7 @@ If the target host completely disallows crawling via `robots.txt`, returns a 403
 
 ## 5. Deterministic Finding Model
 
-Every finding produced by the marketplace is **100% deterministic**: running the audit against identical server responses produces identical finding sets, IDs, severities, and evidence. This is enforced by:
+All analysis decisions produced by the marketplace are **deterministic**: evaluating identical fetched server responses produces identical finding sets, IDs, severities, evidence states, and remediation plans (excluding run timestamps and duration metadata). This is enforced by:
 
 - **Rule-based heuristics only**: no LLM prompts, no random sampling, no probabilistic scoring.
 - **SHA-256 link sampling**: internal URL selection in ER-004 uses `sorted(links, key=sha256_digest)[:N]`, guaranteeing uniform URL-space coverage with perfect reproducibility.
@@ -352,7 +352,7 @@ An honest appraisal of current system boundaries:
 | robots.txt Respect | Obey RFC 9309 | Full RFC 9309 parser; fail-closed on 5xx | **PASS** |
 | Self-Contained & Portable | Standard deps, no proprietary lock-in | Python 3.10+, pinned `requirements.txt`, no proprietary APIs | **PASS** |
 | Execution Budget | Under wall-clock ceiling | Monotonic `AuditDeadline` (default 240 s); typical runs 4–15 s | **PASS** |
-| No Pretrained Weights | Zero model weight files | 100% deterministic rule-based analysis | **PASS** |
+| No Pretrained Weights | Zero model weight files | Deterministic rule-based analysis | **PASS** |
 | Schema-Validated Report | Validated against JSON Schema | Emitted report validates against `report.schema.json` (Draft-07) | **PASS** |
 | Evidence & Severity | Every finding has severity, evidence, action | 100% of findings include ID, severity, evidence, suggested_action | **PASS** |
 | Proactive Suggestions | Forward-looking AI recommendations | Dedicated engine: PA-001..PA-006, PA-CANONICAL | **PASS** |

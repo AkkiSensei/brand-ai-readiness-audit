@@ -10,7 +10,7 @@
 
 Traditional search engines rank keyword-matched URLs for humans to click. Modern generative AI engines (**ChatGPT Search**, **Claude**, **Perplexity**, **Google Gemini**, **Microsoft Copilot**) operate differently: they ingest content into context chunks, extract factual assertions into knowledge graphs, verify claims across third-party sources, and synthesize direct conversational answers with citations.
 
-When a brand website blocks AI user-agents, serves blank client-rendered JavaScript shells, traps pricing or specs in raster images, or lacks Schema.org entity linkages, AI engines cannot ingest the site. This leads to **omission from AI search**, **entity confusion**, or **hallucinated brand facts**.
+When a brand website blocks AI user-agents, serves blank client-rendered JavaScript shells, traps pricing or specs in raster images, or lacks Schema.org entity linkages, automated AI ingestion pipelines struggle to extract and corroborate the brand's core data. This leads to **omission from AI search**, **entity confusion**, or **hallucinated brand facts**.
 
 This marketplace autonomously inspects any public brand website, evaluates **30 defect heuristics** across five skill domains, and produces an objective, evidence-backed, schema-validated JSON audit report with actionable remediation guidance and **7 proactive AI-readiness recommendations**.
 
@@ -20,9 +20,9 @@ This marketplace autonomously inspects any public brand website, evaluates **30 
 
 | Dimension | Typical Approach | This Marketplace |
 |---|---|---|
-| **Determinism** | Non-deterministic LLM grading | **100% deterministic** rule-based analysis; identical inputs → identical findings |
+| **Determinism** | Non-deterministic LLM grading | **Deterministic analysis decisions** for identical fetched content; rule-based evaluation |
 | **Model footprint** | Gigabytes of weights or costly API keys | **Zero model weights**; pure Python rules |
-| **Execution speed** | 60–180 s due to API latency | **Sub-15 s** typical; global 240 s hard deadline |
+| **Execution speed** | 60–180 s due to API latency | **Bounded by global deadline** (default 240 s); typical runs 4–15 s |
 | **Security posture** | Blind HTTP fetchers | **SSRF-hardened** + socket-level DNS pinning |
 | **Link sampling** | Random or alphabetically biased | **SHA-256 deterministic** uniform sampling |
 

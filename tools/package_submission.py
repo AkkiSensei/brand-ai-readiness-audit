@@ -32,11 +32,9 @@ ROOT_FILES = [
     "README.md",
     "PROJECT_CONTEXT.md",
     "PROJECT_DESCRIPTION.md",
-    "CONTEXT.md",
     "marketplace.json",
     "requirements.txt",
     "pytest.ini",
-    "programatix_audit_report.json",
 ]
 
 # Directories to include
