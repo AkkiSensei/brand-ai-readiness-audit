@@ -17,10 +17,22 @@ import re
 import sys
 import time
 import urllib.parse
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Optional
+
+# Use defusedxml to prevent DTD/entity-expansion attacks in sitemap XML.
+# Fall back to stdlib with a warning if defusedxml is somehow absent.
+try:
+    import defusedxml.ElementTree as ET  # type: ignore[import]
+    _DEFUSED_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    import xml.etree.ElementTree as ET  # type: ignore[assignment]
+    _DEFUSED_AVAILABLE = False
+    logging.getLogger(__name__).warning(
+        "defusedxml not available; sitemap XML entity expansion protections degraded. "
+        "Install defusedxml>=0.7.1 to restore full hardening."
+    )
 
 from bs4 import BeautifulSoup
 
@@ -32,6 +44,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from http_client import (
+    AuditDeadline,
     HttpClient,
     PlaywrightRenderer,
     PageResult,
@@ -39,6 +52,7 @@ from http_client import (
     extract_text_ratio,
     normalise_url,
     is_same_origin,
+    EvidenceState,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +84,16 @@ _ENGAGE = _T.get("engagement", {})
 MAX_PAGES: int = int(_CRAWL.get("max_pages", 15))
 MAX_DEPTH: int = int(_CRAWL.get("max_depth", 3))
 SITEMAP_MAX: int = int(_CRAWL.get("sitemap_max_urls", 500))
+# Per-document byte limit before XML parsing (1 MiB default)
+SITEMAP_MAX_DOC_BYTES: int = int(_CRAWL.get("sitemap_max_doc_bytes", 1_048_576))
+# Cumulative byte limit across all sitemap documents in one audit (5 MiB default)
+SITEMAP_MAX_CUMULATIVE_BYTES: int = int(_CRAWL.get("sitemap_max_cumulative_bytes", 5_242_880))
+# Maximum number of sitemap documents fetched during index recursion (25 default)
+SITEMAP_MAX_DOCS: int = int(_CRAWL.get("sitemap_max_docs", 25))
+# Maximum links extracted from a single page to prevent link-explosion amplification
+MAX_LINKS_PER_PAGE: int = int(_CRAWL.get("max_links_per_page", 200))
+# Maximum BFS queue depth to bound memory when a page links to thousands of URLs
+MAX_QUEUE_SIZE: int = int(_CRAWL.get("max_queue_size", 500))
 DISALLOW_EXT: list[str] = _CRAWL.get("disallow_extensions", [])
 TEXT_BLANK_THRESH: float = float(_RENDER.get("text_blanking_ratio_threshold", 0.15))
 CSR_WARN_THRESH: float = float(_RENDER.get("csr_text_ratio_warning", 0.30))
@@ -127,27 +151,59 @@ def _skip_url(url: str) -> bool:
     return False
 
 
-def _parse_sitemap_xml(xml_text: str) -> list[str]:
-    """Extract all <loc> URLs from sitemap XML."""
+def _parse_sitemap_xml(
+    xml_text: str,
+    *,
+    max_bytes: int = SITEMAP_MAX_DOC_BYTES,
+) -> list[str]:
+    """Extract all <loc> URLs from sitemap XML.
+
+    Hardening:
+    - Rejects documents exceeding *max_bytes* before parsing to prevent
+      memory exhaustion from large XML blobs.
+    - Uses defusedxml (when available) to block DTD entity-expansion attacks
+      (billion-laughs, XXE).  The stdlib fallback will still raise ParseError
+      on external entity references but may expand internal entities; prefer
+      keeping defusedxml installed.
+    """
+    if not xml_text:
+        return []
+    # Byte-size gate — check encoded length against the threshold.
+    encoded = xml_text.encode("utf-8", errors="replace")
+    if len(encoded) > max_bytes:
+        logger.warning(
+            "Sitemap document exceeds byte limit (%d > %d bytes); skipping parse.",
+            len(encoded),
+            max_bytes,
+        )
+        return []
     urls: list[str] = []
     try:
-        root = ET.fromstring(xml_text)
+        root = ET.fromstring(xml_text)  # defusedxml.ET raises on entity/DTD
         ns = ""
         if root.tag.startswith("{"):
             ns = root.tag.split("}")[0] + "}"
         for loc in root.iter(f"{ns}loc"):
             if loc.text:
                 urls.append(loc.text.strip())
-    except ET.ParseError:
+    except Exception:
+        # Catches ET.ParseError, defusedxml.DTDForbidden, defusedxml.EntitiesForbidden, etc.
         pass
     return urls
 
 
 def _is_sitemap_index(xml_text: str) -> bool:
+    """Return True if xml_text is a sitemapindex document (not a plain urlset)."""
+    if not xml_text:
+        return False
+    # Apply the same byte-size gate before parsing.
+    encoded = xml_text.encode("utf-8", errors="replace")
+    if len(encoded) > SITEMAP_MAX_DOC_BYTES:
+        return False
     try:
         root = ET.fromstring(xml_text)
         return "sitemapindex" in root.tag.lower()
-    except ET.ParseError:
+    except Exception:
         return False
 
 
@@ -167,6 +223,27 @@ def _get_sitemap_lastmods(xml_text: str) -> list[Optional[str]]:
     return mods
 
 
+def _is_cross_origin_sitemap(sitemap_url: str, origin_url: str) -> bool:
+    """Return True if sitemap_url resolves to a different registered domain than origin_url.
+
+    A cross-origin sitemap child could be used to redirect the crawler to an
+    attacker-controlled document server; block such pivots.
+    """
+    try:
+        sm = urllib.parse.urlparse(sitemap_url)
+        orig = urllib.parse.urlparse(origin_url)
+        # Extract the registered domain (last two labels) for comparison.
+        # e.g. "cdn.example.com" -> "example.com"
+        def _reg_domain(hostname: str | None) -> str:
+            if not hostname:
+                return ""
+            parts = hostname.lower().split(".")
+            return ".".join(parts[-2:]) if len(parts) >= 2 else hostname.lower()
+        return _reg_domain(sm.hostname) != _reg_domain(orig.hostname)
+    except Exception:
+        return True  # Fail closed on any parse error.
+
+
 def _fetch_sitemap_urls(
     sitemap_url: str,
     client: HttpClient,
@@ -174,29 +251,76 @@ def _fetch_sitemap_urls(
     depth: int = 0,
     t_start: float | None = None,
     timeout_s: float | None = None,
+    deadline: Optional[AuditDeadline] = None,
+    *,
+    origin_url: str = "",
+    cumulative_bytes: list[int] | None = None,
 ) -> tuple[list[str], str]:
-    """Recursively fetch sitemap URLs. Returns (urls, raw_xml)."""
+    """Recursively fetch sitemap URLs. Returns (urls, raw_xml).
+
+    Hardening:
+    - *depth* cap: do not recurse past SITEMAP_MAX_DOCS total fetches.
+    - *cumulative_bytes* cap: abort recursion when total XML bytes parsed
+      exceeds SITEMAP_MAX_CUMULATIVE_BYTES to prevent amplification across
+      many medium-sized child documents.
+    - Cross-origin guard: child sitemaps must share the same registered
+      domain as the original target; cross-origin children are skipped.
+    - Per-document size gate is enforced inside _parse_sitemap_xml.
+    """
+    if deadline and deadline.expired():
+        return [], ""
     if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
         return [], ""
     if visited is None:
         visited = set()
-    if sitemap_url in visited or depth > 3:
+    if cumulative_bytes is None:
+        cumulative_bytes = [0]  # Mutable int box shared across all recursion levels.
+
+    # Hard depth/document cap: use len(visited) as a proxy for total docs fetched.
+    if sitemap_url in visited or len(visited) >= SITEMAP_MAX_DOCS or depth > 3:
         return [], ""
     visited.add(sitemap_url)
 
-    result = client.get(sitemap_url, skip_robots_check=True)
+    result = client.get(sitemap_url, skip_robots_check=True, deadline=deadline)
     if result.error or not result.html:
         return [], ""
 
     raw_xml = result.html
+    # Accumulate and check cumulative byte budget.
+    doc_bytes = len(raw_xml.encode("utf-8", errors="replace"))
+    cumulative_bytes[0] += doc_bytes
+    if cumulative_bytes[0] > SITEMAP_MAX_CUMULATIVE_BYTES:
+        logger.warning(
+            "Sitemap cumulative byte limit exceeded (%d > %d bytes); aborting sitemap recursion.",
+            cumulative_bytes[0],
+            SITEMAP_MAX_CUMULATIVE_BYTES,
+        )
+        return [], ""
+
     if _is_sitemap_index(raw_xml):
         sub_urls = _parse_sitemap_xml(raw_xml)
         all_urls: list[str] = []
-        for sub in sub_urls[:10]:
+        for sub in sub_urls:
+            if deadline and deadline.expired():
+                break
             if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
                 break
+            if len(visited) >= SITEMAP_MAX_DOCS:
+                logger.debug("Sitemap document cap (%d) reached; stopping index recursion.", SITEMAP_MAX_DOCS)
+                break
+            # Cumulative byte guard checked in the *parent* loop so we stop
+            # dispatching further child fetches once the budget is exhausted.
+            if cumulative_bytes[0] > SITEMAP_MAX_CUMULATIVE_BYTES:
+                break
+            # Cross-origin guard: skip child sitemaps on a different registered domain.
+            check_origin = origin_url or sitemap_url
+            if _is_cross_origin_sitemap(sub, check_origin):
+                logger.debug("Skipping cross-origin sitemap child: %s (origin: %s)", sub, check_origin)
+                continue
             child_urls, _ = _fetch_sitemap_urls(
-                sub, client, visited, depth + 1, t_start=t_start, timeout_s=timeout_s,
+                sub, client, visited, depth + 1,
+                t_start=t_start, timeout_s=timeout_s, deadline=deadline,
+                origin_url=check_origin, cumulative_bytes=cumulative_bytes,
             )
             all_urls.extend(child_urls)
             if len(all_urls) >= SITEMAP_MAX:
@@ -207,12 +331,19 @@ def _fetch_sitemap_urls(
 
 
 def _extract_links(soup: Any, base_url: str) -> list[str]:
-    """Extract unique same-origin <a href> links."""
+    """Extract unique same-origin <a href> links, capped at MAX_LINKS_PER_PAGE.
+
+    Hardening: a page with tens-of-thousands of links (link farm, generated
+    navigation, etc.) must not translate into an unbounded BFS queue.  We stop
+    collecting after MAX_LINKS_PER_PAGE unique, valid, same-origin links.
+    """
     if soup is None:
         return []
     seen: set[str] = set()
     links: list[str] = []
     for a_tag in soup.find_all("a", href=True):
+        if len(links) >= MAX_LINKS_PER_PAGE:
+            break
         abs_url = normalise_url(a_tag["href"], base_url)
         if not abs_url or abs_url in seen:
             continue
@@ -235,6 +366,7 @@ def _discover_frontier(
     t_start: float | None = None,
     timeout_s: float | None = None,
     renderer: Optional[PlaywrightRenderer] = None,
+    deadline: Optional[AuditDeadline] = None,
 ) -> tuple[list[str], dict[str, PageResult], list[str], str]:
     """BFS crawl to build the page frontier.
 
@@ -251,12 +383,12 @@ def _discover_frontier(
     sitemap_xml: str = ""
 
     # -- 1. Fetch homepage --
-    home = client.get(target_url)
+    home = client.get(target_url, deadline=deadline)
     if home.error:
         errors.append(f"Homepage fetch failed: {home.error}")
     if renderer is not None and home.is_html and not home.error:
         try:
-            renderer.render(target_url, page_result=home)
+            renderer.render(target_url, page_result=home, deadline=deadline)
         except Exception as r_exc:
             logger.warning("Renderer failed for %s: %s", target_url, r_exc)
 
@@ -267,7 +399,7 @@ def _discover_frontier(
 
     # -- 2. Sitemaps from robots.txt --
     sm_from_robots = client.robots.get_sitemaps(target_url)
-    sm_candidates = list(sm_from_robots)
+    sm_candidates = sorted(list(dict.fromkeys(sm_from_robots)))
 
     # Fallback: try standard paths
     if not sm_candidates:
@@ -281,12 +413,15 @@ def _discover_frontier(
     sm_page_urls: list[str] = []
     sm_visited: set[str] = set()
     for sm_url in sm_candidates:
+        if deadline and deadline.expired():
+            errors.append("Sitemap discovery truncated: timeout budget reached")
+            break
         if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
             errors.append("Sitemap discovery truncated: timeout budget reached")
             break
         try:
             urls, raw = _fetch_sitemap_urls(
-                sm_url, client, sm_visited, t_start=t_start, timeout_s=timeout_s,
+                sm_url, client, sm_visited, t_start=t_start, timeout_s=timeout_s, deadline=deadline,
             )
             sm_page_urls.extend(urls)
             if raw and not sitemap_xml:
@@ -307,6 +442,9 @@ def _discover_frontier(
 
     # -- 5. BFS --
     while queue and len(frontier) < max_pages:
+        if deadline and deadline.expired():
+            errors.append("Crawl frontier truncated: timeout budget reached")
+            break
         if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
             errors.append("Crawl frontier truncated: timeout budget reached")
             break
@@ -319,12 +457,12 @@ def _discover_frontier(
         if _skip_url(url):
             continue
 
-        pr = client.get(url)
+        pr = client.get(url, deadline=deadline)
         if pr.error:
             errors.append(f"Fetch error ({url}): {pr.error}")
         if renderer is not None and pr.is_html and not pr.error:
             try:
-                renderer.render(url, page_result=pr)
+                renderer.render(url, page_result=pr, deadline=deadline)
             except Exception as r_exc:
                 logger.warning("Renderer failed for %s: %s", url, r_exc)
 
@@ -337,7 +475,15 @@ def _discover_frontier(
         if pr.soup and depth < MAX_DEPTH:
             for link in _extract_links(pr.soup, final_url):
                 if link not in visited:
-                    queue.append((link, depth + 1))
+                    # BFS queue cap: prevent unbounded memory growth from link-farm pages.
+                    if len(queue) < MAX_QUEUE_SIZE:
+                        queue.append((link, depth + 1))
+                    else:
+                        logger.debug(
+                            "BFS queue cap (%d) reached; discarding further links from %s.",
+                            MAX_QUEUE_SIZE, final_url,
+                        )
+                        break
 
     return frontier, page_results, errors, sitemap_xml
 
@@ -435,7 +581,7 @@ def _check_cr002(
                 "WAF / anti-bot challenge blocking crawler access",
                 "critical",
                 f"{len(waf_urls)} URL(s) blocked by active WAF or anti-bot challenge: "
-                + "; ".join(waf_urls[:5])
+                + "; ".join(sorted(waf_urls)[:5])
                 + ("..." if len(waf_urls) > 5 else ""),
                 "Configure edge WAF and bot-defense rules to permit legitimate AI crawler "
                 "user-agents or IPs, or provide dedicated machine-readable sitemaps/APIs.",
@@ -449,7 +595,7 @@ def _check_cr002(
                 "Pages returning non-OK HTTP status codes",
                 "high",
                 f"{len(bad_codes)} URL(s) with unexpected status: "
-                + "; ".join(bad_codes[:5])
+                + "; ".join(sorted(bad_codes)[:5])
                 + ("..." if len(bad_codes) > 5 else ""),
                 "Fix server responses so all public pages return 200 (OK) or "
                 "use 301 for permanent redirects. Remove or correct links to "
@@ -464,7 +610,7 @@ def _check_cr002(
                 "Excessive redirect chains detected",
                 "low",
                 f"{len(long_redirects)} URL(s) with >2 redirect hops: "
-                + "; ".join(long_redirects[:5]),
+                + "; ".join(sorted(long_redirects)[:5]),
                 "Shorten redirect chains to at most 1-2 hops to avoid crawler "
                 "timeouts and wasted crawl budget.",
                 related=["CR-008"],
@@ -542,6 +688,13 @@ def _check_cr003_cr004(
                     else:
                         pr.render_confidence = "high"
                     continue
+                else:
+                    # Epistemic honesty: when renderer was provided but rendering failed,
+                    # timed out, or was blocked, we CANNOT observe the post-JS DOM.
+                    # This is an observation limitation, NOT evidence that dynamic content
+                    # is missing. Do not flag CR-003 or CR-004.
+                    pr.render_confidence = "low"
+                    continue
 
             # --- Static-only heuristic (used when renderer is None or render skipped) ---
             raw_ratio = extract_text_ratio(pr.soup)
@@ -562,11 +715,13 @@ def _check_cr003_cr004(
             is_spa = bool(has_app_root and has_module_script and word_count < 80)
             if is_spa and raw_ratio < CSR_WARN_THRESH:
                 spa_shell_urls.add(url)
-                display.setdefault(url, f"{url} (SPA shell)")
+                display.setdefault(url, f"{url} (SPA shell in raw HTML; JS rendering unverified)")
 
             has_substantial_text = (word_count >= 250 and len(visible_text) >= 1000)
             effective_ratio = raw_ratio
-            if not has_substantial_text:
+            # Only infer client-side blanking if the page contains scripts
+            has_scripts = bool(pr.soup.find("script") or is_spa)
+            if not has_substantial_text and has_scripts:
                 disp = f"{url} (ratio={effective_ratio:.2f})"
                 if effective_ratio < TEXT_BLANK_THRESH and (word_count < 80 or is_spa):
                     severe_urls.add(url)
@@ -575,7 +730,7 @@ def _check_cr003_cr004(
                     moderate_urls.add(url)
                     display[url] = disp
 
-            has_blanking = (not has_substantial_text) and (raw_ratio < TEXT_BLANK_THRESH or is_spa)
+            has_blanking = (not has_substantial_text) and has_scripts and (raw_ratio < TEXT_BLANK_THRESH or is_spa)
             if has_blanking:
                 pr.render_confidence = "low"
             else:
@@ -589,6 +744,7 @@ def _check_cr003_cr004(
                 "CR-003",
                 "Severe CSR text blanking — content invisible to non-JS crawlers",
                 "critical",
+                f"[{EvidenceState.CONFIRMED.value if renderer is not None else EvidenceState.INSUFFICIENT_EVIDENCE.value}] "
                 f"{len(combined_urls)} page(s) have critically low text-to-HTML ratio "
                 f"(< {TEXT_BLANK_THRESH}): " + "; ".join(evidence_strs),
                 "Implement server-side rendering (SSR) or static-site generation "
@@ -606,6 +762,7 @@ def _check_cr003_cr004(
                 "CR-004",
                 "Moderate CSR text blanking — reduced content in raw HTML",
                 "high",
+                f"[{EvidenceState.CONFIRMED.value if renderer is not None else EvidenceState.INSUFFICIENT_EVIDENCE.value}] "
                 f"{len(moderate_final)} page(s) have low text ratio "
                 f"(< {CSR_WARN_THRESH}): " + "; ".join(evidence_strs),
                 "Review pages for JS-dependent content rendering. Consider "
@@ -656,8 +813,17 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
 
             flagged_for_page = False
 
-            # Check class/id names for patterns
-            for el in pr.soup.find_all(True):
+            # Check class/id names for patterns.
+            # Hardening: cap element iteration to prevent CPU exhaustion on
+            # pathologically wide or deeply-nested HTML documents.
+            _MAX_ELEMENTS = 50_000
+            for _el_count, el in enumerate(pr.soup.find_all(True)):
+                if _el_count >= _MAX_ELEMENTS:
+                    logger.debug(
+                        "CR-005 element walk capped at %d elements for %s.",
+                        _MAX_ELEMENTS, url,
+                    )
+                    break
                 classes = " ".join(el.get("class", []))
                 el_id = el.get("id", "")
                 comb = f"{classes} {el_id}"
@@ -697,7 +863,7 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                 "Geolocation or location-selection gate blocking catalog content",
                 "high",
                 f"{len(geo_urls)} page(s) enforce geolocation or pincode selection before catalog content renders: "
-                + "; ".join(geo_urls[:5]),
+                + "; ".join(sorted(geo_urls)[:5]),
                 "Ensure autonomous crawlers can access a default, national, or location-agnostic catalog "
                 "without requiring interactive location/pincode selection.",
                 related=["CR-003"],
@@ -711,7 +877,7 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                 "Paywall or login overlay detected blocking content",
                 "high",
                 f"{len(paywall_urls)} page(s) have paywall/login overlay patterns: "
-                + "; ".join(paywall_urls[:5]),
+                + "; ".join(sorted(paywall_urls)[:5]),
                 "Ensure that AI crawlers can access the full page content without encountering login walls. "
                 "Consider implementing metered access with first-click-free for crawler user-agents, "
                 "or use structured data (CreativeWork with isAccessibleForFree).",
@@ -726,7 +892,7 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                 "Full-viewport overlay detected blocking content",
                 "high",
                 f"{len(overlay_urls)} page(s) have full-viewport overlay styling: "
-                + "; ".join(overlay_urls[:5]),
+                + "; ".join(sorted(overlay_urls)[:5]),
                 "Ensure that modal overlays do not obstruct primary content on initial page load.",
                 related=["CR-003"],
                 pages_affected=len(overlay_urls),
@@ -743,10 +909,16 @@ def _check_cr006_cr007(
     client: HttpClient,
     sitemap_xml: str,
     sitemap_from_robots: bool,
+    sitemap_timeout: bool = False,
 ) -> list[dict]:
     """CR-006 (medium) / CR-007 (low): Sitemap validation."""
     findings: list[dict] = []
     try:
+        # Epistemic honesty: if sitemap discovery was truncated by timeout budget,
+        # do NOT assert that the site lacks an XML sitemap.
+        if sitemap_timeout:
+            return findings
+
         # CR-006: No sitemap at all
         if not sitemap_xml:
             findings.append(_finding(
@@ -876,7 +1048,7 @@ def _check_cr008(page_results: dict[str, PageResult]) -> list[dict]:
                 "Public pages marked with noindex directive",
                 "high",
                 f"{len(noindex_pages)} page(s) carry noindex (meta or "
-                f"X-Robots-Tag): " + "; ".join(noindex_pages[:5]),
+                f"X-Robots-Tag): " + "; ".join(sorted(noindex_pages)[:5]),
                 "Remove noindex directives from pages you want AI engines to "
                 "discover. If pages should genuinely be excluded, ensure they "
                 "are not linked from navigation or sitemaps.",
@@ -910,23 +1082,6 @@ def _proactive(
                              "sites.",
                 "priority": "high",
             })
-
-        # Suggest canonical tags if none found
-        has_canonical = False
-        for pr in page_results.values():
-            if pr.soup and pr.soup.find("link", rel="canonical"):
-                has_canonical = True
-                break
-        if not has_canonical:
-            recs.append({
-                "title": "Add rel=canonical link elements",
-                "rationale": "Canonical tags prevent duplicate content issues and "
-                             "consolidate link signals for AI citation engines.",
-                "priority": "medium",
-            })
-
-
-
     except Exception as exc:
         logger.debug("Proactive recs error: %s", exc)
     return recs
@@ -945,11 +1100,19 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     renderer = kwargs.get("renderer", kwargs.get("playwright", None))
     timeout_s = kwargs.get("timeout_s", None)
     t_start = kwargs.get("t_start", None)
+    deadline: Optional[AuditDeadline] = kwargs.get("deadline")
+    if deadline is None and (timeout_s is not None or t_start is not None):
+        deadline = AuditDeadline.from_budget(timeout_s, started_at=t_start)
+
+    if deadline is not None:
+        http_client.set_deadline(deadline)
+        if renderer is not None:
+            renderer.set_deadline(deadline)
 
     # 1. Discover frontier
     frontier, page_results, errors, sitemap_xml = _discover_frontier(
         target_url, http_client, max_pages, t_start=t_start, timeout_s=timeout_s,
-        renderer=renderer,
+        renderer=renderer, deadline=deadline,
     )
 
     # Check whether sitemap was declared in robots.txt
@@ -972,15 +1135,19 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
 
     # 2. Run all checks
     findings: list[dict] = []
+    sitemap_timeout = any("timeout budget reached" in str(e).lower() for e in errors)
     checks = [
         lambda: _check_cr001(target_url, http_client),
         lambda: _check_cr002(page_results),
         lambda: _check_cr003_cr004(page_results, renderer),
         lambda: _check_cr005(page_results),
-        lambda: _check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots),
+        lambda: _check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots, sitemap_timeout=sitemap_timeout),
         lambda: _check_cr008(page_results),
     ]
     for check_fn in checks:
+        if deadline and deadline.expired():
+            errors.append("Crawl checks truncated: timeout budget reached")
+            break
         if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
             errors.append("Crawl checks truncated: timeout budget reached")
             break
@@ -1005,6 +1172,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
             FrontierEntry(
                 u,
                 render_confidence=getattr(page_results.get(u), "render_confidence", "high"),
+                render_state=getattr(page_results.get(u), "render_state", "STATIC_ONLY"),
             )
             for u in frontier
         ],

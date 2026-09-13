@@ -10,6 +10,7 @@ across the crawl frontier.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -28,10 +29,12 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 from http_client import (
+    AuditDeadline,
     HttpClient,
     PageResult,
     normalise_url,
     is_same_origin,
+    EvidenceState,
 )
 
 logger = logging.getLogger(__name__)
@@ -206,15 +209,18 @@ def _check_er001(
     """ER-001 (high): Missing H1 or primary navigation above the fold."""
     findings: list[dict] = []
     try:
-        html_pages = [u for u in frontier if _is_html_page(page_results.get(u))]
-        if not html_pages:
+        valid_html_pages = [
+            u for u in frontier
+            if _is_html_page(page_results.get(u)) and page_results.get(u) and page_results.get(u).soup is not None
+        ]
+        if not valid_html_pages:
             return findings
 
         missing_h1: list[str] = []
         missing_nav: list[str] = []
         multiple_h1: list[str] = []
 
-        for url in html_pages:
+        for url in valid_html_pages:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
@@ -272,13 +278,13 @@ def _check_er001(
                 "Pages missing visible H1 heading",
                 "high",
                 f"{len(missing_h1)} page(s) lack a visible <h1> element: "
-                + "; ".join(missing_h1[:5]),
+                + "; ".join(sorted(missing_h1)[:5]),
                 "Add a clear, descriptive <h1> heading to every page. The H1 "
                 "should appear above the fold and summarise the page topic "
                 "for both users and AI crawlers.",
                 related=["CR-003"],
                 pages_affected=len(missing_h1),
-                pages_checked=len(html_pages),
+                pages_checked=len(valid_html_pages),
             ))
 
         if missing_nav:
@@ -288,11 +294,11 @@ def _check_er001(
                 "medium",
                 f"{len(missing_nav)} page(s) lack <nav> or recognisable "
                 f"navigation with >= {NAV_MIN_LINKS} links: "
-                + "; ".join(missing_nav[:5]),
+                + "; ".join(sorted(missing_nav)[:5]),
                 "Add semantic <nav> elements with at least "
                 f"{NAV_MIN_LINKS} internal links for site-wide navigation.",
                 pages_affected=len(missing_nav),
-                pages_checked=len(html_pages),
+                pages_checked=len(valid_html_pages),
             ))
 
         if multiple_h1:
@@ -301,11 +307,11 @@ def _check_er001(
                 "Multiple H1 tags on a single page",
                 "low",
                 f"{len(multiple_h1)} page(s) have more than one <h1>: "
-                + "; ".join(multiple_h1[:5]),
+                + "; ".join(sorted(multiple_h1)[:5]),
                 "Use a single <h1> per page. Use <h2>-<h6> for sub-sections "
                 "to maintain a clear heading hierarchy.",
                 pages_affected=len(multiple_h1),
-                pages_checked=len(html_pages),
+                pages_checked=len(valid_html_pages),
             ))
 
     except Exception as exc:
@@ -373,7 +379,7 @@ def _check_er002(
                 "medium",
                 f"{len(deep_pages_without_breadcrumbs)} page(s) at depth >= 2 "
                 "lack breadcrumb navigation (HTML or BreadcrumbList schema): "
-                + "; ".join(deep_pages_without_breadcrumbs[:5]),
+                + "; ".join(sorted(deep_pages_without_breadcrumbs)[:5]),
                 "Add BreadcrumbList JSON-LD structured data and visible "
                 "breadcrumb <nav> (with aria-label='breadcrumb') to pages "
                 "deeper than the homepage.",
@@ -451,7 +457,7 @@ def _check_er003(
                 "high",
                 f"{len(overlay_pages)} page(s) have fixed/absolute overlays "
                 f"with high z-index (> {Z_INDEX_THRESH}) that may obscure "
-                "content: " + "; ".join(overlay_pages[:5]),
+                "content: " + "; ".join(sorted(overlay_pages)[:5]),
                 "Remove or defer full-page interstitials. Use dismissible "
                 "banners that do not cover more than 50% of the viewport. "
                 "Ensure main content is immediately accessible to AI crawlers.",
@@ -464,7 +470,7 @@ def _check_er003(
                 "Cookie consent banner detected on pages",
                 "medium",
                 f"{len(cookie_pages)} page(s) have cookie/GDPR consent "
-                "elements: " + "; ".join(cookie_pages[:5]),
+                "elements: " + "; ".join(sorted(cookie_pages)[:5]),
                 "Ensure cookie banners do not cover the main content area. "
                 "Use a small fixed banner rather than a full-page overlay.",
             ))
@@ -475,7 +481,7 @@ def _check_er003(
                 "Newsletter subscription modal detected",
                 "low",
                 f"{len(newsletter_pages)} page(s) have newsletter/subscribe "
-                "modal elements: " + "; ".join(newsletter_pages[:5]),
+                "modal elements: " + "; ".join(sorted(newsletter_pages)[:5]),
                 "Delay newsletter modals until after meaningful user "
                 "interaction. Avoid showing them to crawler user-agents.",
             ))
@@ -492,6 +498,7 @@ def _check_er004(
     root_url: str,
     t_start: float | None = None,
     timeout_s: float | None = None,
+    deadline: Any = None,
 ) -> list[dict]:
     """ER-004 (medium/high): Broken internal link ratio."""
     findings: list[dict] = []
@@ -516,20 +523,29 @@ def _check_er004(
         if not all_internal_links:
             return findings
 
-        # Sample up to 25 links deterministically (sorted slice — same input → same output)
+        # Sample up to 25 links deterministically without alphabetical bias
+        # (SHA-256 key ensures uniform distribution across the URL namespace while remaining 100% reproducible)
         sample_size = min(BROKEN_LINK_SAMPLE_SIZE, len(all_internal_links))
         if len(all_internal_links) > BROKEN_LINK_SAMPLE_SIZE:
-            sample = sorted(all_internal_links)[:BROKEN_LINK_SAMPLE_SIZE]
+            sample = sorted(
+                all_internal_links,
+                key=lambda u: hashlib.sha256(u.encode("utf-8")).hexdigest(),
+            )[:BROKEN_LINK_SAMPLE_SIZE]
         else:
             sample = all_internal_links
 
         broken: list[str] = []
+        tested_count = 0
         for link in sample:
+            eff_deadline = deadline if deadline is not None else getattr(http_client, "_deadline", None)
+            if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                break
             if t_start is not None and timeout_s is not None and (time.monotonic() - t_start >= timeout_s):
                 break
             # Check if we already have this result
             pr = page_results.get(link)
             if pr:
+                tested_count += 1
                 if pr.status_code and pr.status_code >= 400:
                     broken.append(f"{link} (HTTP {pr.status_code})")
                 elif pr.status_code is None and pr.error:
@@ -538,39 +554,54 @@ def _check_er004(
 
             # HEAD check for uncrawled links
             try:
-                head = http_client.head(link)
+                if isinstance(eff_deadline, AuditDeadline):
+                    head = http_client.head(link, deadline=eff_deadline)
+                else:
+                    head = http_client.head(link)
+                if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                    break
+                tested_count += 1
                 if head.status_code and head.status_code >= 400:
                     broken.append(f"{link} (HTTP {head.status_code})")
                 elif head.status_code is None and head.error:
                     broken.append(f"{link} ({head.error[:60]})")
             except Exception:
-                broken.append(f"{link} (request failed)")
+                if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                    break
+                # Network timeout or transport failure: NOT_OBSERVABLE, do not falsely count as broken internal link
 
-        ratio = len(broken) / sample_size if sample_size > 0 else 0
+        if tested_count == 0:
+            return findings
+
+        ratio = len(broken) / tested_count
         if broken and ratio > BROKEN_LINK_RATIO_THRESHOLD:
             severity = "high" if ratio > 0.15 else "medium"
             findings.append(_finding(
                 "ER-004",
                 "High broken internal link ratio",
                 severity,
-                f"{len(broken)}/{sample_size} sampled internal links are "
-                f"broken ({ratio:.0%}): " + "; ".join(broken[:5]),
+                f"[{EvidenceState.CONTRADICTED.value}] {len(broken)}/{tested_count} sampled internal links are "
+                f"broken ({ratio:.0%}): " + "; ".join(sorted(broken)[:5]),
                 "Audit and fix all broken internal links. Use a link checker "
                 "tool to identify and correct or remove dead links across "
                 "the site. Broken links degrade AI-engine trust.",
                 related=["CR-002"],
+                pages_affected=len(broken),
+                pages_checked=tested_count,
             ))
         elif broken:
             findings.append(_finding(
                 "ER-004",
                 "Broken internal links detected",
                 "medium",
-                f"{len(broken)} broken link(s) found in sample of "
-                f"{sample_size}: " + "; ".join(broken[:5]),
+                f"[{EvidenceState.CONTRADICTED.value}] {len(broken)} broken link(s) found in sample of "
+                f"{tested_count}: " + "; ".join(sorted(broken)[:5]),
                 "Fix broken internal links to maintain site integrity. "
                 "Even a small number of dead links reduces crawler "
                 "confidence in content quality.",
                 related=["CR-002"],
+                pages_affected=len(broken),
+                pages_checked=tested_count,
             ))
 
     except Exception as exc:
@@ -638,7 +669,7 @@ def _check_er005(
                 "medium",
                 f"{len(pages_without_cta)}/{len(product_pages)} "
                 "product/landing page(s) lack a recognisable call-to-action "
-                "button or link: " + "; ".join(pages_without_cta[:5]),
+                "button or link: " + "; ".join(sorted(pages_without_cta)[:5]),
                 "Add clear, above-the-fold CTA buttons (e.g., 'Buy Now', "
                 "'Get Started', 'Request Demo') to product and landing pages. "
                 "CTAs signal page purpose to AI engines.",
@@ -656,14 +687,17 @@ def _check_er006_er007(
     """ER-006/ER-007 (high): Responsive layout — viewport meta and mobile."""
     findings: list[dict] = []
     try:
-        html_pages = [u for u in frontier if _is_html_page(page_results.get(u))]
-        if not html_pages:
+        valid_html_pages = [
+            u for u in frontier
+            if _is_html_page(page_results.get(u)) and page_results.get(u) and page_results.get(u).soup is not None
+        ]
+        if not valid_html_pages:
             return findings
 
         missing_viewport: list[str] = []
         bad_viewport: list[str] = []
 
-        for url in html_pages:
+        for url in valid_html_pages:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
@@ -700,13 +734,13 @@ def _check_er006_er007(
                 "high",
                 f"{len(missing_viewport)} page(s) lack "
                 '<meta name="viewport"> tag: '
-                + "; ".join(missing_viewport[:5]),
+                + "; ".join(sorted(missing_viewport)[:5]),
                 'Add <meta name="viewport" content="width=device-width, '
                 'initial-scale=1"> to all pages. Without it, mobile '
                 "rendering is unpredictable and AI engines may deprioritise "
                 "the content.",
                 pages_affected=len(missing_viewport),
-                pages_checked=len(html_pages),
+                pages_checked=len(valid_html_pages),
             ))
 
         if bad_viewport:
@@ -715,12 +749,12 @@ def _check_er006_er007(
                 "Viewport meta restricts user zoom",
                 "medium",
                 f"{len(bad_viewport)} page(s) set user-scalable=no or "
-                "maximum-scale=1: " + "; ".join(bad_viewport[:5]),
+                "maximum-scale=1: " + "; ".join(sorted(bad_viewport)[:5]),
                 "Remove user-scalable=no and maximum-scale=1 from viewport "
                 "meta. Allow users to zoom for accessibility compliance and "
                 "improved mobile experience signals.",
                 pages_affected=len(bad_viewport),
-                pages_checked=len(html_pages),
+                pages_checked=len(valid_html_pages),
             ))
 
     except Exception as exc:
@@ -909,7 +943,7 @@ def _check_rendered_engagement(
             "Dynamic call-to-action (CTA) elements detected post-rendering",
             "info",
             f"Primary conversion CTAs appear exclusively in post-JS rendered DOM on "
-            f"{len(rendered_cta_pages)} page(s): " + "; ".join(rendered_cta_pages[:3]) +
+            f"{len(rendered_cta_pages)} page(s): " + "; ".join(sorted(rendered_cta_pages)[:3]) +
             ", but are absent in raw static HTML.",
             "Ensure primary user action buttons and links are present in static HTML "
             "markup to allow AI agents to navigate conversion paths.",
@@ -925,13 +959,25 @@ def _check_rendered_engagement(
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     """Execute Engagement & Retention checks ER-001 -> ER-008."""
-    frontier: list[str] = kwargs.get("crawl_frontier", [target_url])
-    page_results: dict[str, PageResult] = kwargs.get("page_results", {})
+    frontier_raw = kwargs.get("crawl_frontier", [target_url])
+    if not isinstance(frontier_raw, list):
+        frontier_raw = [target_url]
+    frontier: list[str] = [str(u) for u in frontier_raw if u]
+    if not frontier:
+        frontier = [target_url]
+
+    page_results_raw = kwargs.get("page_results", {})
+    page_results: dict[str, PageResult] = page_results_raw if isinstance(page_results_raw, dict) else {}
+    timeout_s = kwargs.get("timeout_s", None)
+    t_start = kwargs.get("t_start", None)
+    deadline = kwargs.get("deadline") or getattr(http_client, "_deadline", None)
 
     if not page_results:
         for url in frontier:
+            if deadline and deadline.expired():
+                break
             try:
-                pr = http_client.get(url)
+                pr = http_client.get(url, deadline=deadline)
                 page_results[pr.url or url] = pr
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
@@ -939,13 +985,10 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     errors: list[str] = []
     findings: list[dict] = []
 
-    timeout_s = kwargs.get("timeout_s", None)
-    t_start = kwargs.get("t_start", None)
-
     findings.extend(_check_er001(frontier, page_results))
     findings.extend(_check_er002(frontier, page_results, target_url))
     findings.extend(_check_er003(frontier, page_results))
-    findings.extend(_check_er004(frontier, page_results, http_client, target_url, t_start=t_start, timeout_s=timeout_s))
+    findings.extend(_check_er004(frontier, page_results, http_client, target_url, t_start=t_start, timeout_s=timeout_s, deadline=deadline))
     findings.extend(_check_er005(frontier, page_results))
     findings.extend(_check_er006_er007(frontier, page_results))
     findings.extend(_check_er008(frontier, page_results))

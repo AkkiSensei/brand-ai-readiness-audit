@@ -28,7 +28,7 @@ _SCRIPTS_DIR = (
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from http_client import HttpClient, PageResult, normalise_url, is_same_origin
+from http_client import AuditDeadline, HttpClient, PageResult, normalise_url, is_same_origin, EvidenceState
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +68,34 @@ PHONE_RE_PATTERN: str = _ENT.get(
 _PHONE_EXTRACT = re.compile(
     r"(?:\+?\d{1,3}[\s\-\.]?)?\(?\d{2,4}\)?[\s\-\.]?\d{3,4}[\s\-\.]?\d{3,4}"
 )
-_ADDRESS_EXTRACT = re.compile(
-    r"\d{1,5}\s+[\w\s]{3,40}"
-    r"(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct|Suite|Ste)"
-    r"[\w\s,\.#\-]{0,80}",
+# Layered address extractors
+# 1. Commonwealth / US / India Street-First pattern (number/unit, road name, suffix, optional locality/code)
+_ADDR_STREET_FIRST = re.compile(
+    r"\b(?:\d{1,5}[A-Za-z0-9\/\-]*|\b(?:Plot|Unit|Block|Flat|Shop|No\.?)\s+\d{1,5})[,\s]+"
+    r"[\w\s\.\-]{2,40}\b"
+    r"(?:Street|St|Avenue|Ave|Boulevard|Blvd|Road|Rd|Drive|Dr|Lane|Ln|Way|Court|Ct|Suite|Ste|"
+    r"Close|Gardens|Square|Park|Walk|Place|Pl|Crescent|Sector|Marg|Nagar|Colony|Enclave|Bhavan)\b"
+    r"(?:[,\s]+[\w\s,\.\#\-]{2,80})?",
     re.IGNORECASE,
 )
+
+# 2. European Street-Name-First pattern (e.g. Speicherstrasse 55, 60327 Frankfurt am Main)
+_ADDR_EU = re.compile(
+    r"\b(?:[A-Z][\w\s\.\-äöüßéèêàáíóú]{3,40}\s+\d{1,4}[A-Za-z]?)[,\s]+"
+    r"(?:[A-Z]{1,2}[-\s])?\d{4,5}\s+[A-Z][\w\s\.\-äöüßéèêàáíóú]{2,30}"
+    r"(?:[,\s]+[A-Z][\w\s]{2,30})?\b",
+    re.UNICODE,
+)
+
+# 3. UK Postcode address pattern (e.g. 10 Downing Street, London SW1A 2AA)
+_ADDR_UK_POSTCODE = re.compile(
+    r"\b\d{1,5}\s+[\w\s,\.\-]{3,60}[,\s]+[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b"
+    r"(?:[,\s]+(?:United Kingdom|UK|England|Scotland|Wales))?",
+    re.IGNORECASE,
+)
+
+# Backwards-compatibility alias
+_ADDRESS_EXTRACT = _ADDR_STREET_FIRST
 
 # Known authoritative sameAs domains
 _AUTHORITATIVE_DOMAINS = {
@@ -81,14 +103,6 @@ _AUTHORITATIVE_DOMAINS = {
     "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
     "github.com", "bloomberg.com", "bbb.org", "yelp.com",
     "google.com",  # Google Knowledge Panel
-}
-
-# Generic dictionary words that cause brand ambiguity
-_GENERIC_WORDS = {
-    "apple", "amazon", "shell", "mercury", "oracle", "target", "dove",
-    "champion", "delta", "united", "frontier", "prime", "pioneer",
-    "summit", "compass", "crown", "liberty", "eagle", "patriot", "horizon",
-    "atlas", "genesis", "icon", "spark", "nova", "element", "core",
 }
 
 # Authority / certification / partnership claim detection heuristics
@@ -215,6 +229,157 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
 
 
+def _format_postal_address(addr: Any) -> str:
+    """Format a Schema.org PostalAddress dictionary or string into a canonical string."""
+    if isinstance(addr, str):
+        return addr.strip()
+    if not isinstance(addr, dict):
+        return ""
+    street = addr.get("streetAddress", "")
+    locality = addr.get("addressLocality", "")
+    region = addr.get("addressRegion", "")
+    postal_code = addr.get("postalCode", "")
+    country = addr.get("addressCountry", "")
+    if isinstance(country, dict):
+        country = country.get("name", "")
+    parts = [str(p).strip() for p in [street, locality, region, postal_code, country] if p and str(p).strip()]
+    return ", ".join(parts)
+
+
+_LEGAL_SUFFIX_RE = re.compile(
+    r'\b(?:inc(?:\.|\b)|incorporated|llc|l\.l\.c\.|ltd(?:\.|\b)|limited|corp(?:\.|\b)|corporation|co(?:\.|\b)|company|gmbh|ag|sa|s\.a\.|sas|srl|bv|nv|se|pty(?:\s+ltd)?|pvt(?:\s+ltd)?|plc|llp)\b',
+    re.IGNORECASE
+)
+
+
+def _normalize_brand_root(name: str) -> str:
+    """Extract canonical brand root by removing corporate legal suffixes and punctuation."""
+    if not name:
+        return ""
+    cleaned = re.sub(r'[,.\'"\-–—()]+', ' ', name.lower())
+    cleaned = _LEGAL_SUFFIX_RE.sub('', cleaned)
+    return " ".join(cleaned.split())
+
+
+_ADDR_ABBREVIATIONS = {
+    r"\bstreet\b": "st",
+    r"\broad\b": "rd",
+    r"\bavenue\b": "ave",
+    r"\bboulevard\b": "blvd",
+    r"\bdrive\b": "dr",
+    r"\blane\b": "ln",
+    r"\bcourt\b": "ct",
+    r"\bhighway\b": "hwy",
+    r"\bparkway\b": "pkwy",
+    r"\bsuite\b": "ste",
+    r"\bapartment\b": "apt",
+    r"\bfloor\b": "fl",
+    r"\bbuilding\b": "bldg",
+    r"\bnorth\b": "n",
+    r"\bsouth\b": "s",
+    r"\beast\b": "e",
+    r"\bwest\b": "w",
+}
+
+
+def _normalize_address_tokens(addr: str) -> str:
+    """Normalize address for comparison: lowercase, unify standard postal abbreviations, strip punctuation."""
+    if not addr:
+        return ""
+    norm = addr.lower()
+    norm = re.sub(r"[,.#\-–—]+", " ", norm)
+    for pat, rep in _ADDR_ABBREVIATIONS.items():
+        norm = re.sub(pat, rep, norm)
+    return " ".join(norm.split())
+
+
+def _is_kg_entity_link(url: str) -> bool:
+    """Check whether a URL points to an authoritative knowledge-graph node
+    capable of uniquely disambiguating an entity (Wikidata, Wikipedia, Crunchbase)."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lower()
+        # Wikidata entity: e.g. wikidata.org/wiki/Q... or /entity/Q...
+        if "wikidata.org" in host and ("/wiki/q" in path or "/entity/q" in path):
+            return True
+        # Wikipedia article: e.g. en.wikipedia.org/wiki/...
+        if "wikipedia.org" in host and "/wiki/" in path:
+            return True
+        # Crunchbase organization node: crunchbase.com/organization/...
+        if "crunchbase.com" in host and "/organization/" in path:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _has_disambiguating_evidence(block: dict, primary_name: str) -> bool:
+    """Determine whether an Organization block provides sufficient structural
+    evidence to resolve entity ambiguity.
+
+    Evidence sources:
+    1. Knowledge graph identity linkage: sameAs link to Wikidata, Wikipedia, or Crunchbase
+    2. Explicit Schema.org disambiguatingDescription
+    3. Distinct legalName that specifies legal corporate identity
+    4. Physical grounding: structured or non-empty PostalAddress/address
+    5. Temporal grounding: foundingDate
+    6. Formal corporate identity: taxID, vatID, leiCode, duns, or iso6523Code
+    7. Substantive contextual description: description (>= 30 chars) or knowsAbout
+    """
+    if not isinstance(block, dict):
+        return False
+
+    # 1. Knowledge Graph Linkage
+    sameas = block.get("sameAs", [])
+    if isinstance(sameas, str):
+        sameas = [sameas]
+    if isinstance(sameas, list):
+        if any(_is_kg_entity_link(sa) for sa in sameas):
+            return True
+
+    # 2. Schema.org disambiguatingDescription
+    disambig_desc = block.get("disambiguatingDescription")
+    if disambig_desc and isinstance(disambig_desc, str) and len(disambig_desc.strip()) > 5:
+        return True
+
+    # 3. Distinct legalName
+    legal_name = block.get("legalName")
+    if legal_name and isinstance(legal_name, str) and len(legal_name.strip()) > 2:
+        if legal_name.strip().lower() != primary_name.lower():
+            return True
+
+    # 4. Physical grounding: address
+    addr = block.get("address")
+    if isinstance(addr, dict):
+        if any(addr.get(k) for k in ("streetAddress", "addressLocality", "postalCode", "addressCountry", "addressRegion")):
+            return True
+    elif isinstance(addr, str) and len(addr.strip()) > 5:
+        return True
+
+    # 5. Temporal grounding: foundingDate
+    founding = block.get("foundingDate")
+    if founding and str(founding).strip():
+        return True
+
+    # 6. Corporate registry identifiers
+    for reg_id in ("taxID", "vatID", "leiCode", "duns", "iso6523Code"):
+        val = block.get(reg_id)
+        if val and str(val).strip():
+            return True
+
+    # 7. Substantive topical/domain description
+    desc = block.get("description")
+    if desc and isinstance(desc, str) and len(desc.strip()) >= 30:
+        return True
+    if block.get("knowsAbout"):
+        return True
+
+    return False
+
+
 # ===================================================================
 # CHECK FUNCTIONS
 # ===================================================================
@@ -229,16 +394,20 @@ def _check_tc001(
     try:
         all_sameas: list[str] = []
         has_any_sameas = False
+        has_org_block = False
+        valid_pages: list[str] = []
 
         for url in frontier:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
+            valid_pages.append(url)
             blocks = _extract_jsonld_blocks(pr.soup)
             for block in blocks:
                 types = _get_types(block)
                 if not _is_org_type(types):
                     continue
+                has_org_block = True
                 sameas = block.get("sameAs", [])
                 if isinstance(sameas, str):
                     sameas = [sameas]
@@ -246,23 +415,34 @@ def _check_tc001(
                     has_any_sameas = True
                     all_sameas.extend(sameas)
 
+        if not valid_pages:
+            return findings
+
+        # Epistemic honesty: only evaluate sameAs when an Organization schema was actually observed.
+        # If no Organization schema was found on the site, do not claim that the Organization schema
+        # is missing sameAs (SF-001 already notes the absence of Organization schema).
+        if not has_org_block:
+            return findings
+
         if not has_any_sameas:
             findings.append(_finding(
                 "TC-001",
                 "No sameAs links in Organization schema",
                 "high",
-                "No Organization JSON-LD block contains a sameAs property. "
+                f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] No Organization JSON-LD block contains a sameAs property. "
                 "AI engines cannot corroborate your brand identity against "
                 "authoritative external profiles.",
                 "Add a sameAs array to your Organization JSON-LD with links "
                 "to your official Wikipedia page, Wikidata entry, LinkedIn "
                 "company page, and verified social media profiles.",
                 related=["SF-001"],
+                pages_affected=len(valid_pages),
+                pages_checked=len(valid_pages),
             ))
             return findings
 
         # Validate sameAs URLs
-        unique_sameas = list(set(all_sameas))
+        unique_sameas = sorted(set(all_sameas))
         invalid_urls: list[str] = []
         non_authoritative: list[str] = []
 
@@ -288,8 +468,8 @@ def _check_tc001(
                 "TC-001",
                 "Invalid sameAs URLs in Organization schema",
                 "medium",
-                f"{len(invalid_urls)} sameAs URL(s) are malformed: "
-                + "; ".join(invalid_urls[:5]),
+                f"[{EvidenceState.CONTRADICTED.value}] {len(invalid_urls)} sameAs URL(s) are malformed: "
+                + "; ".join(sorted(invalid_urls)[:5]),
                 "Fix or remove invalid sameAs URLs. Each must be a valid "
                 "HTTP/HTTPS URL pointing to an authoritative profile.",
             ))
@@ -299,7 +479,7 @@ def _check_tc001(
                 "TC-001",
                 "Insufficient sameAs external links",
                 "medium",
-                f"Only {len(unique_sameas)} sameAs link(s) found; "
+                f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] Only {len(unique_sameas)} sameAs link(s) found; "
                 f"minimum recommended is {SAMEAS_MIN}.",
                 "Add more sameAs links to authoritative external profiles "
                 "(Wikipedia, Wikidata, LinkedIn, Crunchbase) to strengthen "
@@ -338,26 +518,29 @@ def _check_tc002(
                 continue
             blocks = _extract_jsonld_blocks(pr.soup)
             for block in blocks:
-                if not _is_org_type(_get_types(block)):
-                    continue
-                name = block.get("name", "")
-                if name and isinstance(name, str):
-                    names.append((name.strip(), url))
+                types = _get_types(block)
+                if _is_org_type(types):
+                    name = block.get("name", "")
+                    if name and isinstance(name, str):
+                        names.append((name.strip(), url))
 
-                addr = block.get("address", {})
-                if isinstance(addr, dict):
-                    street = addr.get("streetAddress", "")
-                    locality = addr.get("addressLocality", "")
-                    region = addr.get("addressRegion", "")
-                    addr_str = f"{street}, {locality}, {region}".strip(", ")
+                    addr = block.get("address", {})
+                    addr_str = _format_postal_address(addr)
+                    is_branch = any(t.lower() in ("localbusiness", "store", "restaurant", "autodealer") for t in types)
                     if len(addr_str) > 5:
-                        addresses.append((addr_str, url))
-                elif isinstance(addr, str) and len(addr) > 5:
-                    addresses.append((addr, url))
+                        locality = ""
+                        if isinstance(addr, dict):
+                            locality = str(addr.get("addressLocality") or addr.get("postalCode") or "").strip().lower()
+                        addresses.append((addr_str, url, locality, is_branch))
 
-                phone = block.get("telephone", "")
-                if phone and isinstance(phone, str):
-                    phones.append((phone.strip(), url))
+                    phone = block.get("telephone", "")
+                    if phone and isinstance(phone, str):
+                        phones.append((phone.strip(), url))
+                elif any(t.lower() == "postaladdress" for t in types):
+                    addr_str = _format_postal_address(block)
+                    if len(addr_str) > 5:
+                        locality = str(block.get("addressLocality") or block.get("postalCode") or "").strip().lower()
+                        addresses.append((addr_str, url, locality, False))
 
         # Extract NAP from visible text (priority pages only)
         for url in priority_urls[:5]:
@@ -372,23 +555,31 @@ def _check_tc002(
                 if len(_normalise_phone(p)) >= 7:
                     phones.append((p.strip(), url))
 
-            # Addresses from text
-            found_addrs = _ADDRESS_EXTRACT.findall(text)
+            # Addresses from text: layered extraction across international patterns
+            found_addrs: list[str] = []
+            for pat in (_ADDR_STREET_FIRST, _ADDR_EU, _ADDR_UK_POSTCODE):
+                for match in pat.finditer(text):
+                    candidate = match.group(0).strip().strip(".,")
+                    if len(candidate) >= 10 and not any(candidate in a for a in found_addrs):
+                        found_addrs.append(candidate)
+
             for a in found_addrs[:3]:
-                addresses.append((a.strip(), url))
+                addresses.append((a.strip(), url, "", False))
 
         # Evaluate consistency
         # Names
         if len(names) >= 2:
             name_values = [n[0] for n in names]
             unique_names = set(n.lower().strip() for n in name_values)
-            if len(unique_names) > MAX_NAME_VARIANTS:
+            # Group by canonical brand roots to prevent false positives from legal suffixes (Inc, LLC, Ltd)
+            unique_roots = set(_normalize_brand_root(n) for n in name_values if _normalize_brand_root(n))
+            if len(unique_roots) > MAX_NAME_VARIANTS:
                 findings.append(_finding(
                     "TC-002",
                     "Inconsistent brand name across pages",
                     "high",
-                    f"Brand name appears as {len(unique_names)} distinct "
-                    f"variants: {', '.join(sorted(unique_names)[:5])}",
+                    f"[{EvidenceState.CONTRADICTED.value}] Brand name appears as {len(unique_roots)} contradictory "
+                    f"root variants: {', '.join(sorted(unique_roots)[:5])} (raw: {', '.join(sorted(unique_names)[:5])})",
                     "Standardise the brand name across all pages and JSON-LD. "
                     "Use alternateName for legitimate variations.",
                     related=["TC-004"],
@@ -407,7 +598,7 @@ def _check_tc002(
                         "TC-002",
                         "Inconsistent phone numbers across pages",
                         "medium",
-                        f"{len(unique_phones)} distinct phone number(s) "
+                        f"[{EvidenceState.CONTRADICTED.value}] {len(unique_phones)} distinct phone number(s) "
                         f"found with {ratio:.0%} consistency ratio "
                         f"(threshold: {NAP_MIN_RATIO:.0%}).",
                         "Standardise phone number format across all pages. "
@@ -417,22 +608,57 @@ def _check_tc002(
 
         # Addresses
         if len(addresses) >= 2:
-            addr_values = [a[0] for a in addresses]
-            # Pairwise similarity
+            # Check if the site operates multiple distinct locations (e.g. branch offices / stores)
+            is_multi_location_context = any(
+                any(seg in u.lower() for seg in ("/locations", "/stores", "/branches", "/offices", "/dealers", "/find-us"))
+                for u in frontier
+            )
+            has_branch_schema = any(len(a) > 3 and a[3] for a in addresses)
+            page_address_counts = Counter(a[1] for a in addresses)
+            has_multi_address_page = any(cnt > 1 for cnt in page_address_counts.values())
+            is_multi_location = is_multi_location_context or has_branch_schema or has_multi_address_page
+
+            distinct_explicit_localities = set(a[2] for a in addresses if a[2])
             mismatches = 0
             comparisons = 0
-            for i in range(len(addr_values)):
-                for j in range(i + 1, min(i + 5, len(addr_values))):
-                    sim = _similarity(addr_values[i], addr_values[j])
-                    comparisons += 1
-                    if sim < ADDR_SIM_THRESH:
-                        mismatches += 1
+
+            if is_multi_location and len(distinct_explicit_localities) > 1:
+                # Multi-location presence: group by locality or compare only within matching localities
+                locality_groups: dict[str, list[str]] = {}
+                for a_str, _, loc, *_ in addresses:
+                    group_key = loc if loc else "general"
+                    locality_groups.setdefault(group_key, []).append(a_str)
+                # Compare within each locality group that has >= 2 addresses
+                for loc, grp in locality_groups.items():
+                    if loc == "general" and len(distinct_explicit_localities) > 1:
+                        # Skip cross-comparing unlocated visible-text snippets when explicit multiple locations exist
+                        continue
+                    if len(grp) >= 2:
+                        for i in range(len(grp)):
+                            for j in range(i + 1, min(i + 4, len(grp))):
+                                norm_i = _normalize_address_tokens(grp[i])
+                                norm_j = _normalize_address_tokens(grp[j])
+                                sim = _similarity(norm_i, norm_j)
+                                comparisons += 1
+                                if sim < ADDR_SIM_THRESH:
+                                    mismatches += 1
+            else:
+                addr_values = [a[0] for a in addresses]
+                for i in range(len(addr_values)):
+                    for j in range(i + 1, min(i + 5, len(addr_values))):
+                        norm_i = _normalize_address_tokens(addr_values[i])
+                        norm_j = _normalize_address_tokens(addr_values[j])
+                        sim = _similarity(norm_i, norm_j)
+                        comparisons += 1
+                        if sim < ADDR_SIM_THRESH:
+                            mismatches += 1
+
             if comparisons > 0 and mismatches / comparisons > (1 - NAP_MIN_RATIO):
                 findings.append(_finding(
                     "TC-002",
                     "Inconsistent address information across pages",
                     "medium",
-                    f"{mismatches}/{comparisons} address comparisons below "
+                    f"[{EvidenceState.CONTRADICTED.value}] {mismatches}/{comparisons} address comparisons below "
                     f"similarity threshold ({ADDR_SIM_THRESH}).",
                     "Standardise address formatting across all pages and "
                     "JSON-LD. Use PostalAddress structured data with "
@@ -521,6 +747,7 @@ def _check_tc003(
     http_client: HttpClient,
     t_start: float | None = None,
     timeout_s: float | None = None,
+    deadline: Any = None,
 ) -> list[dict]:
     """TC-003 (high): Claimed external partner or accreditation links broken.
 
@@ -546,14 +773,23 @@ def _check_tc003(
                     unique_urls.append((link, c["source_url"]))
 
         failed: list[str] = []
+        unobservable: list[str] = []
         affected_pages: set[str] = set()
 
         for target_url, src_page in unique_urls[:MAX_CLAIM_VERIFICATION_URLS]:
+            eff_deadline = deadline if deadline is not None else getattr(http_client, "_deadline", None)
+            if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                break
             if t_start is not None and timeout_s is not None:
                 if time.monotonic() - t_start >= timeout_s:
                     break
             try:
-                head = http_client.head(target_url)
+                if isinstance(eff_deadline, AuditDeadline):
+                    head = http_client.head(target_url, deadline=eff_deadline)
+                else:
+                    head = http_client.head(target_url)
+                if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                    break
                 is_walled_garden = any(
                     d in target_url.lower()
                     for d in ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com")
@@ -563,22 +799,28 @@ def _check_tc003(
                 elif is_walled_garden and (head.status_code == 999 or head.status_code in (401, 403)):
                     # Anti-bot response confirms endpoint exists
                     continue
-                else:
-                    code = head.status_code or "no response"
+                elif head.status_code and head.status_code >= 400:
+                    if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                        break
+                    code = head.status_code
                     failed.append(f"{target_url} (HTTP {code})")
                     affected_pages.add(src_page)
+                else:
+                    unobservable.append(f"{target_url} (no HTTP status)")
             except Exception as exc:
-                failed.append(f"{target_url} (error: {exc})")
-                affected_pages.add(src_page)
+                if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                    break
+                # Epistemic honesty: unobservable / timed out target does NOT prove the claim is false
+                unobservable.append(f"{target_url} (unreachable: {exc})")
 
         if failed:
             findings.append(_finding(
                 "TC-003",
                 "Claimed external partner or accreditation links are broken",
                 "high",
-                f"{len(failed)} outbound verification link(s) for claimed "
+                f"[{EvidenceState.CONTRADICTED.value}] {len(failed)} outbound verification link(s) for claimed "
                 f"credentials returned broken HTTP status: "
-                + "; ".join(failed[:5]),
+                + "; ".join(sorted(failed)[:5]),
                 "Audit and update outbound accreditation and trust verification "
                 "links to ensure all targets resolve cleanly.",
                 related=[],
@@ -607,14 +849,14 @@ def _check_tc005(
         if not unlinked:
             return findings
 
-        sample_claims = ['"' + c["text"] + '"' for c in unlinked[:3]]
+        sample_claims = ['"' + c["text"] + '"' for c in sorted(unlinked, key=lambda c: (c.get("source_url", ""), c.get("text", "")))[:3]]
         affected_pages = len(set(c["source_url"] for c in unlinked))
 
         findings.append(_finding(
             "TC-005",
             "Authority or partnership claims lack external verification links",
             "medium",
-            f"Site presents {len(unlinked)} authority or partnership claim(s) "
+            f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] Site presents {len(unlinked)} authority or partnership claim(s) "
             f"without verifiable outbound links: " + "; ".join(sample_claims),
             "Add verifiable outbound links to authoritative registries, industry "
             "bodies, or official partner directories so AI engines can corroborate claims.",
@@ -648,11 +890,13 @@ def _check_tc004_tc006(
     try:
         brand_names: list[str] = []
         org_blocks: list[dict] = []
+        valid_pages: list[str] = []
 
         for url in frontier:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
+            valid_pages.append(url)
             blocks = _extract_jsonld_blocks(pr.soup)
             for block in blocks:
                 if _is_org_type(_get_types(block)):
@@ -661,43 +905,41 @@ def _check_tc004_tc006(
                     if name and isinstance(name, str):
                         brand_names.append(name.strip())
 
-        # TC-004: Check brand name against generic dictionary words
+        if not valid_pages:
+            return findings
+
+        # TC-004: Brand entity ambiguity detection via structural evidence
         if brand_names:
-            primary_name = brand_names[0].lower().strip()
-            words = set(primary_name.split())
-            generic_hits = words & _GENERIC_WORDS
+            primary_name = brand_names[0].strip()
 
-            if generic_hits:
-                # Check if disambiguation is present
-                has_disambig = False
-                for block in org_blocks:
-                    if block.get("foundingDate") or block.get("address") or \
-                       block.get("knowsAbout") or block.get("description"):
-                        has_disambig = True
-                        break
+            # Check if disambiguation is present in any Organization block
+            has_disambig = any(
+                _has_disambiguating_evidence(block, primary_name)
+                for block in org_blocks
+            )
 
-                if not has_disambig:
-                    findings.append(_finding(
-                        "TC-004",
-                        "Brand name is ambiguous without disambiguation",
-                        "critical",
-                        f"Brand name '{brand_names[0]}' contains generic "
-                        f"word(s) ({', '.join(generic_hits)}) that collide "
-                        "with common dictionary terms. No JSON-LD "
-                        "disambiguators (foundingDate, address, knowsAbout, "
-                        "description) are present.",
-                        "Add disambiguating properties to your Organization "
-                        "schema: foundingDate, address, knowsAbout, and a "
-                        "detailed description. Consider adding alternateName "
-                        "with your legal/full brand name.",
-                        related=["TC-006"],
-                    ))
+            if not has_disambig:
+                findings.append(_finding(
+                    "TC-004",
+                    "Brand name is ambiguous without disambiguation",
+                    "critical",
+                    f"Brand entity '{primary_name}' lacks unique knowledge "
+                    "graph linkage (Wikidata/Wikipedia sameAs) and provides "
+                    "no structural disambiguation (legalName, disambiguatingDescription, "
+                    "address, foundingDate, or description). AI engines cannot "
+                    "disambiguate this brand from potential entity collisions.",
+                    "Add disambiguating properties to your Organization schema: "
+                    "connect to a Wikidata entity in sameAs, specify legalName, "
+                    "address, foundingDate, and a detailed description.",
+                    related=["TC-006", "TC-001"],
+                    pages_affected=len(valid_pages),
+                    pages_checked=len(valid_pages),
+                ))
 
-        # TC-004: Capitalisation variants
+        # TC-004: Capitalisation variants (only evaluate casing differences of identical brand string)
         if len(brand_names) >= 2:
-            cap_variants: set[str] = set()
-            for n in brand_names:
-                cap_variants.add(n)
+            primary_lower = brand_names[0].strip().lower()
+            cap_variants = set(n.strip() for n in brand_names if n.strip().lower() == primary_lower)
             if len(cap_variants) > MAX_NAME_VARIANTS:
                 findings.append(_finding(
                     "TC-004",
@@ -709,6 +951,8 @@ def _check_tc004_tc006(
                     "and structured data. Use alternateName for legitimate "
                     "abbreviations or translations.",
                     related=["TC-002"],
+                    pages_affected=len(valid_pages),
+                    pages_checked=len(valid_pages),
                 ))
 
         # TC-006: Missing Organization disambiguators
@@ -726,7 +970,7 @@ def _check_tc004_tc006(
                 break  # Check primary org block only
 
             if missing_disambig:
-                unique_missing = list(dict.fromkeys(missing_disambig))
+                unique_missing = sorted(dict.fromkeys(missing_disambig))
                 findings.append(_finding(
                     "TC-006",
                     "Organization schema missing disambiguation properties",
@@ -737,6 +981,8 @@ def _check_tc004_tc006(
                     "to your Organization JSON-LD to help AI engines "
                     "distinguish your brand from others with similar names.",
                     related=["TC-004"],
+                    pages_affected=len(valid_pages),
+                    pages_checked=len(valid_pages),
                 ))
         else:
             findings.append(_finding(
@@ -748,6 +994,8 @@ def _check_tc004_tc006(
                 "Add an Organization JSON-LD block to your homepage with "
                 "name, url, foundingDate, address, and description.",
                 related=["SF-001"],
+                pages_affected=len(valid_pages),
+                pages_checked=len(valid_pages),
             ))
 
     except Exception as exc:
@@ -846,7 +1094,7 @@ def _check_rendered_trust_signals(
             "Dynamic sameAs social/entity graph links detected post-rendering",
             "info",
             f"Authoritative entity links appear in post-JS rendered DOM on "
-            f"{len(rendered_sameas_pages)} page(s): " + "; ".join(rendered_sameas_pages[:3]) +
+            f"{len(rendered_sameas_pages)} page(s): " + "; ".join(sorted(rendered_sameas_pages)[:3]) +
             ", but are absent in raw static HTML.",
             "Ensure authoritative entity and social links are present in static HTML "
             "markup to guarantee discovery by non-JS crawlers.",
@@ -862,26 +1110,35 @@ def _check_rendered_trust_signals(
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     """Execute Trust & Entity Corroboration checks TC-001 -> TC-006."""
-    frontier: list[str] = kwargs.get("crawl_frontier", [target_url])
-    page_results: dict[str, PageResult] = kwargs.get("page_results", {})
+    frontier_raw = kwargs.get("crawl_frontier", [target_url])
+    if not isinstance(frontier_raw, list):
+        frontier_raw = [target_url]
+    frontier: list[str] = [str(u) for u in frontier_raw if u]
+    if not frontier:
+        frontier = [target_url]
+
+    page_results_raw = kwargs.get("page_results", {})
+    page_results: dict[str, PageResult] = page_results_raw if isinstance(page_results_raw, dict) else {}
+    t_start: float | None = kwargs.get("t_start")
+    timeout_s: float | None = kwargs.get("timeout_s")
+    deadline = kwargs.get("deadline") or getattr(http_client, "_deadline", None)
 
     if not page_results:
         for url in frontier:
+            if deadline and deadline.expired():
+                break
             try:
-                pr = http_client.get(url)
+                pr = http_client.get(url, deadline=deadline)
                 page_results[pr.url or url] = pr
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
-
-    t_start: float | None = kwargs.get("t_start")
-    timeout_s: float | None = kwargs.get("timeout_s")
 
     errors: list[str] = []
     findings: list[dict] = []
 
     findings.extend(_check_tc001(frontier, page_results, http_client))
     findings.extend(_check_tc002(frontier, page_results))
-    findings.extend(_check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s))
+    findings.extend(_check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s, deadline=deadline))
     findings.extend(_check_tc005(frontier, page_results))
     findings.extend(_check_tc004_tc006(frontier, page_results))
     findings.extend(_check_rendered_trust_signals(frontier, page_results))

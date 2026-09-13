@@ -21,12 +21,14 @@ Design constraints enforced here:
 
 from __future__ import annotations
 
+from enum import Enum
 import ipaddress
 import json
 import logging
 import os
 import re
 import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -40,6 +42,10 @@ import requests
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import urllib3.connection
+import urllib3.connectionpool
+import urllib3.exceptions
+import urllib3.util.connection as conn_util
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -89,7 +95,22 @@ DEFAULT_HEADERS: dict = _HTTP_CFG.get(
 )
 KNOWN_AI_CRAWLERS: list[str] = _ROBOTS_CFG.get(
     "known_ai_crawlers",
-    ["GPTBot", "ChatGPT-User", "Google-Extended", "CCBot", "anthropic-ai"],
+    [
+        "GPTBot",
+        "ChatGPT-User",
+        "Google-Extended",
+        "CCBot",
+        "anthropic-ai",
+        "Claude-Web",
+        "PerplexityBot",
+        "Amazonbot",
+        "FacebookBot",
+        "Applebot-Extended",
+        "YouBot",
+        "Omgilibot",
+        "Diffbot",
+        "Bytespider",
+    ],
 )
 PLAYWRIGHT_WAIT_MS: int = int(_RENDER_CFG.get("playwright_wait_ms", 3000))
 PLAYWRIGHT_TIMEOUT_MS: int = int(_RENDER_CFG.get("playwright_timeout_ms", 15000))
@@ -98,57 +119,407 @@ PLAYWRIGHT_VIEWPORT: dict = {
     "width": int(_RENDER_CFG.get("playwright_viewport_width", 1280)),
     "height": int(_RENDER_CFG.get("playwright_viewport_height", 800)),
 }
+MAX_BROWSER_REQUESTS_PER_PAGE: int = int(_RENDER_CFG.get("max_browser_requests_per_page", 150))
+MAX_BROWSER_REDIRECTS: int = int(_RENDER_CFG.get("max_browser_redirects", 5))
+ALLOWED_BROWSER_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # ---------------------------------------------------------------------------
-# SSRF Disallowed Address Ranges
+# SSRF Disallowed Address Ranges & Destination Pinning
 # ---------------------------------------------------------------------------
 _DISALLOWED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),       # Loopback IPv4
-    ipaddress.ip_network("10.0.0.0/8"),        # Private RFC1918
-    ipaddress.ip_network("172.16.0.0/12"),     # Private RFC1918
-    ipaddress.ip_network("192.168.0.0/16"),    # Private RFC1918
-    ipaddress.ip_network("169.254.0.0/16"),    # Link-local / Cloud Metadata (169.254.169.254)
-    ipaddress.ip_network("0.0.0.0/8"),         # Current network
-    ipaddress.ip_network("::1/128"),           # Loopback IPv6
-    ipaddress.ip_network("fc00::/7"),          # Unique local IPv6
-    ipaddress.ip_network("fe80::/10"),         # Link-local IPv6
+    # IPv4
+    ipaddress.ip_network("127.0.0.0/8"),        # Loopback IPv4
+    ipaddress.ip_network("10.0.0.0/8"),         # Private RFC1918
+    ipaddress.ip_network("172.16.0.0/12"),      # Private RFC1918
+    ipaddress.ip_network("192.168.0.0/16"),     # Private RFC1918
+    ipaddress.ip_network("169.254.0.0/16"),     # Link-local / Cloud Metadata (169.254.169.254)
+    ipaddress.ip_network("0.0.0.0/8"),          # Current / unspecified network
+    ipaddress.ip_network("100.64.0.0/10"),      # Carrier-Grade NAT / Cloud Shared RFC 6598
+    ipaddress.ip_network("192.0.0.0/24"),       # IETF Protocol Assignments RFC 6890
+    ipaddress.ip_network("192.0.2.0/24"),       # TEST-NET-1 RFC 5737
+    ipaddress.ip_network("198.51.100.0/24"),    # TEST-NET-2 RFC 5737
+    ipaddress.ip_network("203.0.113.0/24"),     # TEST-NET-3 RFC 5737
+    ipaddress.ip_network("198.18.0.0/15"),      # Network Interconnect Benchmark RFC 2544
+    ipaddress.ip_network("224.0.0.0/4"),        # Multicast RFC 5771
+    ipaddress.ip_network("240.0.0.0/4"),        # Reserved RFC 1112
+    ipaddress.ip_network("255.255.255.255/32"), # Limited Broadcast RFC 919
+    # IPv6
+    ipaddress.ip_network("::1/128"),            # Loopback IPv6
+    ipaddress.ip_network("::/128"),             # Unspecified IPv6
+    ipaddress.ip_network("fc00::/7"),           # Unique local IPv6 (ULA)
+    ipaddress.ip_network("fe80::/10"),          # Link-local IPv6
+    ipaddress.ip_network("ff00::/8"),           # Multicast IPv6
+    ipaddress.ip_network("2001:db8::/32"),      # Documentation IPv6 RFC 3849
 ]
+
+_6TO4_NET = ipaddress.ip_network("2002::/16")
+_NAT64_NET = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_COMPAT_NET = ipaddress.ip_network("::/96")
+_RESTRICTED_LOCAL_DOMAINS = frozenset({
+    "localhost",
+    "metadata.google.internal",
+    "metadata",
+    "instance-data",
+})
+
+
+def normalize_ip(ip_or_str: str | ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Normalize an IP address or string, extracting the IPv4 address from IPv4-mapped, 6to4, or NAT64 IPv6."""
+    if isinstance(ip_or_str, str):
+        ip = ipaddress.ip_address(ip_or_str.strip("[]"))
+    else:
+        ip = ip_or_str
+
+    if isinstance(ip, ipaddress.IPv6Address):
+        # 1. Standard IPv4-mapped IPv6 (::ffff:0:0/96)
+        mapped = getattr(ip, "ipv4_mapped", None)
+        if mapped is not None:
+            return mapped
+
+        # 2. 6to4 prefix (2002::/16): bytes 2..6 encode embedded IPv4
+        if ip in _6TO4_NET:
+            try:
+                return ipaddress.IPv4Address(ip.packed[2:6])
+            except Exception:
+                pass
+
+        # 3. Well-known NAT64 prefix (64:ff9b::/96): bytes 12..16 encode embedded IPv4
+        if ip in _NAT64_NET:
+            try:
+                return ipaddress.IPv4Address(ip.packed[12:16])
+            except Exception:
+                pass
+
+        # 4. Deprecated IPv4-compatible IPv6 (::/96): bytes 12..16 encode embedded IPv4
+        if ip != ipaddress.IPv6Address("::") and ip != ipaddress.IPv6Address("::1") and ip in _IPV4_COMPAT_NET:
+            try:
+                return ipaddress.IPv4Address(ip.packed[12:16])
+            except Exception:
+                pass
+
+    return ip
+
+
+def is_ip_disallowed(ip_or_str: str | ipaddress.IPv4Address | ipaddress.IPv6Address) -> tuple[bool, str]:
+    """Check whether a single IP address (with IPv4-mapped IPv6 normalization) falls in any disallowed network."""
+    try:
+        norm_ip = normalize_ip(ip_or_str)
+        for net in _DISALLOWED_NETWORKS:
+            if norm_ip in net:
+                return True, f"IP {norm_ip} is in disallowed network {net}"
+        return False, ""
+    except Exception as exc:
+        return True, f"Malformed or invalid IP '{ip_or_str}': {exc}"
+
+
+def resolve_and_validate_destination(
+    hostname_or_ip: str,
+    allow_private_ips: bool = False,
+) -> tuple[bool, str, list[str]]:
+    """Resolve a destination and validate all resulting IP addresses against SSRF policies.
+
+    Returns:
+        (is_disallowed, reason, list_of_validated_ips)
+    """
+    if not hostname_or_ip or not hostname_or_ip.strip():
+        return True, "Destination hostname is empty", []
+
+    cleaned = hostname_or_ip.strip().strip("[]")
+    if not cleaned:
+        return True, "Destination hostname is empty", []
+
+    # 1. Direct IP string
+    try:
+        ip_obj = ipaddress.ip_address(cleaned)
+        if allow_private_ips:
+            return False, "", [str(ip_obj)]
+        disallowed, reason = is_ip_disallowed(ip_obj)
+        if disallowed:
+            return True, reason, []
+        return False, "", [str(normalize_ip(ip_obj))]
+    except ValueError:
+        pass
+
+    # 2. Check restricted local domain names
+    if not allow_private_ips and cleaned.lower() in _RESTRICTED_LOCAL_DOMAINS:
+        return True, f"Hostname '{hostname_or_ip}' is a restricted local or cloud metadata domain", []
+
+    # 3. Resolve hostname via DNS
+    try:
+        addr_info = socket.getaddrinfo(cleaned, None)
+        if not addr_info:
+            return True, f"DNS resolution for '{hostname_or_ip}' returned no addresses", []
+
+        valid_ips: list[str] = []
+        for res in addr_info:
+            ip_str = res[4][0]
+            try:
+                ip_obj = ipaddress.ip_address(ip_str)
+                if not allow_private_ips:
+                    disallowed, reason = is_ip_disallowed(ip_obj)
+                    if disallowed:
+                        return True, f"Hostname '{hostname_or_ip}' resolved to disallowed IP {ip_str} ({reason})", []
+                valid_ips.append(str(normalize_ip(ip_obj)))
+            except ValueError:
+                return True, f"Hostname '{hostname_or_ip}' resolved to malformed IP '{ip_str}'", []
+
+        # Deduplicate while preserving order
+        unique_ips = list(dict.fromkeys(valid_ips))
+        return False, "", unique_ips
+    except Exception as exc:
+        # Phase 2.5: DNS resolution failures must fail closed
+        return True, f"DNS resolution failed for hostname '{hostname_or_ip}': {exc}", []
+
 
 def is_ssrf_disallowed(hostname_or_ip: str) -> tuple[bool, str]:
     """Check if a hostname or IP resolves to a private, loopback, link-local, or cloud-metadata address."""
-    if not hostname_or_ip:
-        return False, ""
-    try:
-        # Check if direct IP string
+    disallowed, reason, _ = resolve_and_validate_destination(hostname_or_ip, allow_private_ips=False)
+    return disallowed, reason
+
+
+class DestinationPinningManager:
+    """Thread-safe destination pinning cache mapping hostnames to validated IP addresses."""
+
+    def __init__(self) -> None:
+        self._pinned: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def pin(self, host: str, ip: str) -> None:
+        if not host or not ip:
+            return
+        with self._lock:
+            self._pinned[host.lower()] = ip
+
+    def get(self, host: str) -> Optional[str]:
+        if not host:
+            return None
+        with self._lock:
+            return self._pinned.get(host.lower())
+
+    def clear(self) -> None:
+        with self._lock:
+            self._pinned.clear()
+
+
+class SSRFSafeHTTPConnection(urllib3.connection.HTTPConnection):
+    """HTTPConnection that pins the socket connection to a pre-validated IP address."""
+
+    def __init__(
+        self,
+        *args,
+        pin_manager: Optional[DestinationPinningManager] = None,
+        allow_private_ips: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._pin_manager = pin_manager
+        self._allow_private_ips = allow_private_ips
+
+    def _new_conn(self) -> socket.socket:
+        target_ip = None
+        if not self._allow_private_ips:
+            try:
+                ip_obj = ipaddress.ip_address(self.host.strip("[]"))
+                disallowed, reason = is_ip_disallowed(ip_obj)
+                if disallowed:
+                    raise urllib3.exceptions.NewConnectionError(
+                        self, f"Blocked by SSRF protection: {reason}"
+                    )
+                target_ip = str(normalize_ip(ip_obj))
+            except ValueError:
+                if self._pin_manager:
+                    target_ip = self._pin_manager.get(self.host)
+                if not target_ip:
+                    disallowed, reason, ips = resolve_and_validate_destination(
+                        self.host, allow_private_ips=self._allow_private_ips
+                    )
+                    if disallowed or not ips:
+                        raise urllib3.exceptions.NewConnectionError(
+                            self, f"Blocked by SSRF protection: {reason or 'no valid IP addresses resolved'}"
+                        )
+                    target_ip = ips[0]
+                    if self._pin_manager:
+                        self._pin_manager.pin(self.host, target_ip)
+
+        connect_host = target_ip if target_ip else self._dns_host
         try:
-            ip = ipaddress.ip_address(hostname_or_ip)
-            for net in _DISALLOWED_NETWORKS:
-                if ip in net:
-                    return True, f"IP {ip} is in disallowed network {net}"
-            return False, ""
-        except ValueError:
-            pass
+            sock = conn_util.create_connection(
+                (connect_host, self.port),
+                self.timeout,
+                source_address=self.source_address,
+                socket_options=self.socket_options,
+            )
+        except socket.gaierror as e:
+            raise urllib3.exceptions.NameResolutionError(self.host, self, e) from e
+        except TimeoutError as e:
+            raise urllib3.exceptions.ConnectTimeoutError(
+                self,
+                f"Connection to {self.host} timed out. (connect timeout={self.timeout})",
+            ) from e
+        except OSError as e:
+            raise urllib3.exceptions.NewConnectionError(
+                self, f"Failed to establish a new connection: {e}"
+            ) from e
 
-        # Check common local names
-        if hostname_or_ip.lower() in ("localhost", "metadata.google.internal"):
-            return True, f"Hostname '{hostname_or_ip}' is a restricted local domain"
-
-        # Resolve hostname via DNS
-        addr_info = socket.getaddrinfo(hostname_or_ip, None)
-        for family, socktype, proto, canonname, sockaddr in addr_info:
-            ip_str = sockaddr[0]
-            ip = ipaddress.ip_address(ip_str)
-            for net in _DISALLOWED_NETWORKS:
-                if ip in net:
-                    return True, f"Hostname '{hostname_or_ip}' resolved to disallowed IP {ip} in {net}"
-        return False, ""
-    except Exception:
-        return False, ""
+        sys.audit("http.client.connect", self, self.host, self.port)
+        return sock
 
 
+class SSRFSafeHTTPSConnection(urllib3.connection.HTTPSConnection):
+    """HTTPSConnection that connects strictly to the pre-validated/pinned IP while preserving TLS SNI and cert validation."""
+
+    def __init__(
+        self,
+        *args,
+        pin_manager: Optional[DestinationPinningManager] = None,
+        allow_private_ips: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._pin_manager = pin_manager
+        self._allow_private_ips = allow_private_ips
+
+    def _new_conn(self) -> socket.socket:
+        target_ip = None
+        if not self._allow_private_ips:
+            try:
+                ip_obj = ipaddress.ip_address(self.host.strip("[]"))
+                disallowed, reason = is_ip_disallowed(ip_obj)
+                if disallowed:
+                    raise urllib3.exceptions.NewConnectionError(
+                        self, f"Blocked by SSRF protection: {reason}"
+                    )
+                target_ip = str(normalize_ip(ip_obj))
+            except ValueError:
+                if self._pin_manager:
+                    target_ip = self._pin_manager.get(self.host)
+                if not target_ip:
+                    disallowed, reason, ips = resolve_and_validate_destination(
+                        self.host, allow_private_ips=self._allow_private_ips
+                    )
+                    if disallowed or not ips:
+                        raise urllib3.exceptions.NewConnectionError(
+                            self, f"Blocked by SSRF protection: {reason or 'no valid IP addresses resolved'}"
+                        )
+                    target_ip = ips[0]
+                    if self._pin_manager:
+                        self._pin_manager.pin(self.host, target_ip)
+
+        connect_host = target_ip if target_ip else self._dns_host
+        try:
+            sock = conn_util.create_connection(
+                (connect_host, self.port),
+                self.timeout,
+                source_address=self.source_address,
+                socket_options=self.socket_options,
+            )
+        except socket.gaierror as e:
+            raise urllib3.exceptions.NameResolutionError(self.host, self, e) from e
+        except TimeoutError as e:
+            raise urllib3.exceptions.ConnectTimeoutError(
+                self,
+                f"Connection to {self.host} timed out. (connect timeout={self.timeout})",
+            ) from e
+        except OSError as e:
+            raise urllib3.exceptions.NewConnectionError(
+                self, f"Failed to establish a new connection: {e}"
+            ) from e
+
+        sys.audit("http.client.connect", self, self.host, self.port)
+        return sock
+
+
+class SSRFSafeHTTPAdapter(HTTPAdapter):
+    """Requests HTTPAdapter enforcing SSRF destination validation and pinning socket connections."""
+
+    def __init__(
+        self,
+        pin_manager: Optional[DestinationPinningManager] = None,
+        allow_private_ips: bool = False,
+        **kwargs,
+    ) -> None:
+        self.pin_manager = pin_manager or DestinationPinningManager()
+        self.allow_private_ips = allow_private_ips
+        super().__init__(**kwargs)
+
+    def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
+        conn = super().get_connection_with_tls_context(request, verify, proxies, cert)
+        if getattr(conn, "scheme", "") == "https":
+            conn.ConnectionCls = SSRFSafeHTTPSConnection
+        else:
+            conn.ConnectionCls = SSRFSafeHTTPConnection
+        conn.conn_kw["pin_manager"] = self.pin_manager
+        conn.conn_kw["allow_private_ips"] = self.allow_private_ips
+        return conn
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        if not self.allow_private_ips:
+            url_parsed = urllib.parse.urlparse(request.url)
+            host = url_parsed.hostname or ""
+            pinned = self.pin_manager.get(host)
+            if pinned:
+                disallowed, reason = is_ip_disallowed(pinned)
+                if disallowed:
+                    raise requests.exceptions.ConnectionError(
+                        f"Blocked by SSRF protection: pinned IP {pinned} is disallowed ({reason})"
+                    )
+            else:
+                disallowed, reason, ips = resolve_and_validate_destination(host, allow_private_ips=False)
+                if disallowed or not ips:
+                    raise requests.exceptions.ConnectionError(
+                        f"Blocked by SSRF protection: {reason or 'no valid IP addresses resolved'}"
+                    )
+                self.pin_manager.pin(host, ips[0])
+
+        return super().send(request, stream=stream, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
+
+
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Data Types
 # ---------------------------------------------------------------------------
+
+class EvidenceState(str, Enum):
+    """Minimal observation state of evidence for audited claims, facts, and assets.
+
+    Distinguishes positive observation, definitive contradiction, absence of
+    asserted corroboration, and unobservable/unreachable targets without
+    manufacturing certainty.
+    """
+
+    CONFIRMED = "CONFIRMED"                      # Direct observation verified (e.g. resolving accreditation link, confirmed entity/markup)
+    CONTRADICTED = "CONTRADICTED"                # Definitively disproven or broken (e.g. 404/410 broken link, contradictory facts)
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE" # Claim or fact asserted but uncorroborated (e.g. claim without verification link, unstated date)
+    NOT_OBSERVABLE = "NOT_OBSERVABLE"            # Target source unreachable, timeout, transport failure, renderer unavailable
+
+
+class CoverageState(str, Enum):
+    """Compact, deterministic audit coverage state.
+
+    Indicates how much of the target and domain checks were genuinely observable:
+    - COMPLETE: Full observation; all planned pages and checks executed with high confidence.
+    - PARTIAL: Substantial audit ran, but bounded by budget, sampled probes, or partial responses.
+    - LIMITED: Key evidence sources unobservable (e.g. static-only without JS, unverified external links).
+    - UNAVAILABLE: Target or domain blocked, unreachable, or failed before inspection.
+    """
+
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    LIMITED = "LIMITED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class RenderState(str, Enum):
+    """Explicit observation state of browser rendering for a page."""
+
+    CONFIRMED = "CONFIRMED"                      # Rendering succeeded; post-JS DOM captured and inspected
+    PARTIAL = "PARTIAL"                          # Partial rendering / blanking observed
+    STATIC_ONLY = "STATIC_ONLY"                  # Browser rendering not requested or static-only crawl
+    RENDER_UNAVAILABLE = "RENDER_UNAVAILABLE"    # Playwright or Chromium not available / installed
+    RENDER_FAILED = "RENDER_FAILED"              # Browser navigation timed out, crashed, or errored
+    BLOCKED = "BLOCKED"                          # Browser navigation or subrequest blocked by security policy
+    UNKNOWN = "UNKNOWN"                          # Unevaluated or uninspected state
+
 
 @dataclass
 class PageResult:
@@ -212,7 +583,13 @@ class PageResult:
     """True if Playwright was used to capture rendered_html."""
 
     render_confidence: str = "high"
-    """Render confidence for this page: 'high' or 'low'."""
+    """Render confidence for this page: 'high', 'medium', or 'low'."""
+
+    render_state: RenderState = RenderState.STATIC_ONLY
+    """Explicit observation state for dynamic rendering."""
+
+    evidence_state: Optional[EvidenceState] = None
+    """Observation state of evidence for this page resource."""
 
     @property
     def is_html(self) -> bool:
@@ -233,16 +610,23 @@ class PageResult:
 
 
 class FrontierEntry(str):
-    """An entry in the crawl frontier carrying URL and render confidence.
+    """An entry in the crawl frontier carrying URL, render confidence, and render state.
 
     Inherits from str for seamless backwards compatibility with string-based
-    consumers, while exposing .render_confidence and dict-like access.
+    consumers, while exposing .render_confidence, .render_state and dict-like access.
     """
     render_confidence: str
+    render_state: str
 
-    def __new__(cls, url: str, render_confidence: str = "high"):
+    def __new__(
+        cls,
+        url: str,
+        render_confidence: str = "high",
+        render_state: str = "STATIC_ONLY",
+    ):
         obj = super().__new__(cls, url)
         obj.render_confidence = render_confidence
+        obj.render_state = render_state
         return obj
 
     @property
@@ -254,6 +638,8 @@ class FrontierEntry(str):
             return str(self)
         if key == "render_confidence":
             return self.render_confidence
+        if key == "render_state":
+            return self.render_state
         return default
 
     def __getitem__(self, item: Any) -> Any:
@@ -261,10 +647,16 @@ class FrontierEntry(str):
             return str(self)
         if item == "render_confidence":
             return self.render_confidence
+        if item == "render_state":
+            return self.render_state
         return super().__getitem__(item)
 
     def to_dict(self) -> dict[str, str]:
-        return {"url": str(self), "render_confidence": self.render_confidence}
+        return {
+            "url": str(self),
+            "render_confidence": self.render_confidence,
+            "render_state": self.render_state,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -282,8 +674,13 @@ class RateLimiter:
         self._last_request: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def wait(self, host: str) -> None:
-        """Block the calling thread until the rate limit window has elapsed."""
+    def wait(self, host: str, deadline: Optional["AuditDeadline"] = None) -> None:
+        """Block the calling thread until the rate limit window has elapsed, bounded by deadline."""
+        if deadline and deadline.expired():
+            return
+        clean_host = (host or "").split(":")[0].lower()
+        if not clean_host or clean_host in ("127.0.0.1", "localhost", "::1"):
+            return
         sleep_time = 0.0
         with self._lock:
             now = time.monotonic()
@@ -295,7 +692,341 @@ class RateLimiter:
             else:
                 self._last_request[host] = now
         if sleep_time > 0:
-            time.sleep(sleep_time)
+            if deadline:
+                sleep_time = min(sleep_time, deadline.remaining())
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+
+# ---------------------------------------------------------------------------
+# Global Audit Deadline Abstraction
+# ---------------------------------------------------------------------------
+
+class AuditDeadline:
+    """Shared authoritative deadline tracking remaining runtime budget across all operations."""
+
+    def __init__(
+        self,
+        timeout_s: float | None = None,
+        started_at: float | None = None,
+    ) -> None:
+        now = time.monotonic()
+        # If started_at is synthetic or in the future, clamp to now to prevent clock skew / negative durations
+        if started_at is not None:
+            self.started_at: float = min(float(started_at), now)
+        else:
+            self.started_at = now
+
+        self.timeout_s: float = float(timeout_s) if timeout_s is not None else float("inf")
+        self.deadline: float = self.started_at + self.timeout_s
+
+    def elapsed(self) -> float:
+        """Wall-clock elapsed time since start (strictly non-negative)."""
+        return max(0.0, time.monotonic() - self.started_at)
+
+    def remaining(self) -> float:
+        """Seconds remaining before deadline expiration (never negative, bounded by timeout_s if positive)."""
+        rem = self.deadline - time.monotonic()
+        if self.timeout_s > 0:
+            return max(0.0, min(self.timeout_s, rem))
+        return 0.0 if rem <= 0 else max(0.0, rem)
+
+    def expired(self) -> bool:
+        """True if the deadline has elapsed."""
+        return self.remaining() <= 0.0
+
+    def child_timeout(self, maximum: float) -> float:
+        """Return min(maximum, remaining()), or 0.0 if expired."""
+        rem = self.remaining()
+        return max(0.0, min(float(maximum), rem))
+
+    def child_timeout_tuple(
+        self,
+        connect_max: float = CONNECT_TIMEOUT,
+        request_max: float = REQUEST_TIMEOUT,
+    ) -> tuple[float, float]:
+        """Return (connect_timeout, request_timeout) tuple clamped to remaining budget."""
+        rem = self.remaining()
+        eff_conn = max(0.001, min(float(connect_max), rem))
+        eff_req = max(0.001, min(float(request_max), rem))
+        return (eff_conn, eff_req)
+
+    @classmethod
+    def from_budget(
+        cls,
+        timeout_s: float | None,
+        started_at: float | None = None,
+    ) -> "AuditDeadline":
+        return cls(timeout_s=timeout_s, started_at=started_at)
+
+
+# ---------------------------------------------------------------------------
+# Robots State Model & Unified Safe Fetch Primitive
+# ---------------------------------------------------------------------------
+
+class RobotsState(str, Enum):
+    """Explicit state of robots.txt retrieval and evaluation."""
+
+    ALLOWED = "ALLOWED"          # robots.txt retrieved and explicitly allows URL, OR 4xx status (unrestricted per RFC 9309)
+    DISALLOWED = "DISALLOWED"    # robots.txt retrieved and explicitly disallows URL, OR 5xx status (server error per RFC 9309)
+    UNAVAILABLE = "UNAVAILABLE"  # network/transport/timeout error retrieving robots.txt (fails closed)
+    BLOCKED = "BLOCKED"          # blocked by SSRF protection on initial URL or redirect hop (fails closed)
+    INVALID = "INVALID"          # redirect loop / too many redirects / parser exception (fails closed)
+
+
+@dataclass
+class RobotsEntry:
+    """Cached robots metadata and parsed rules for an origin."""
+
+    state: RobotsState
+    parser: Optional[urllib.robotparser.RobotFileParser] = None
+    raw: str = ""
+    error: Optional[str] = None
+
+
+@dataclass
+class SafeFetchResult:
+    """Outcome of bounded, SSRF-validated HTTP fetch."""
+
+    response: Optional[requests.Response] = None
+    final_url: str = ""
+    redirect_chain: list[str] = field(default_factory=list)
+    error: Optional[str] = None
+    is_ssrf_blocked: bool = False
+    is_too_many_redirects: bool = False
+    is_timeout: bool = False
+    is_connection_error: bool = False
+    duration_seconds: float = 0.0
+
+
+def _safe_fetch_with_redirects(
+    session: requests.Session,
+    method: str,
+    url: str,
+    pin_manager: Optional[DestinationPinningManager] = None,
+    allow_private_ips: bool = False,
+    block_private_redirects: bool = True,
+    max_redirects: int = 5,
+    headers: Optional[dict] = None,
+    stream: bool = False,
+    timeout: tuple[float, float] = (CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+    limiter: Optional[RateLimiter] = None,
+    deadline: Optional[AuditDeadline] = None,
+) -> SafeFetchResult:
+    """Execute an HTTP request with bounded, SSRF-validated redirects and destination pinning.
+
+    Ensures that every outbound hop (initial request and every redirect transition)
+    is checked against SSRF policy, pinned in DestinationPinningManager, and bounded
+    by the global AuditDeadline.
+    """
+    t0 = time.monotonic()
+    current_url = url
+    redirect_chain: list[str] = []
+    resp: Optional[requests.Response] = None
+
+    ALLOWED_HTTP_METHODS = frozenset({"GET", "HEAD"})
+    method_upper = method.upper()
+    if method_upper not in ALLOWED_HTTP_METHODS:
+        return SafeFetchResult(
+            final_url=url,
+            redirect_chain=redirect_chain,
+            error=f"Blocked non-read-only method '{method_upper}' (only GET and HEAD permitted)",
+            is_connection_error=True,
+            duration_seconds=max(0.0, time.monotonic() - t0),
+        )
+
+    if deadline and deadline.expired():
+        return SafeFetchResult(
+            final_url=url,
+            redirect_chain=redirect_chain,
+            error=f"Audit deadline expired before request could start for {url}",
+            is_timeout=True,
+            duration_seconds=max(0.0, time.monotonic() - t0),
+        )
+
+    for hop in range(max_redirects + 1):
+        if deadline and deadline.expired():
+            return SafeFetchResult(
+                final_url=current_url,
+                redirect_chain=redirect_chain,
+                error=f"Audit deadline expired fetching {current_url}",
+                is_timeout=True,
+                duration_seconds=max(0.0, time.monotonic() - t0),
+            )
+
+        parsed = urllib.parse.urlparse(current_url)
+        if parsed.scheme not in ("http", "https"):
+            return SafeFetchResult(
+                final_url=current_url,
+                redirect_chain=redirect_chain,
+                error=f"Blocked unsupported URL scheme '{parsed.scheme}' (only HTTP and HTTPS permitted)",
+                is_ssrf_blocked=True,
+                duration_seconds=max(0.0, time.monotonic() - t0),
+            )
+        hostname = parsed.hostname or ""
+
+        # Validate SSRF on current_url destination and pin IP
+        if not allow_private_ips:
+            disallowed, reason, cur_ips = resolve_and_validate_destination(hostname, allow_private_ips=False)
+            if disallowed:
+                return SafeFetchResult(
+                    final_url=current_url,
+                    redirect_chain=redirect_chain,
+                    error=f"Blocked by SSRF protection: {reason}",
+                    is_ssrf_blocked=True,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
+                )
+            if pin_manager and cur_ips:
+                pin_manager.pin(hostname, cur_ips[0])
+
+        if limiter:
+            try:
+                limiter.wait(hostname or current_url, deadline=deadline)
+            except Exception as exc:
+                logger.debug("Rate limiter error for %s: %s", current_url, exc)
+
+        # Compute effective hop timeout clamped to remaining deadline
+        if deadline:
+            hop_conn, hop_req = deadline.child_timeout_tuple(timeout[0], timeout[1])
+            if deadline.remaining() <= 0.001:
+                return SafeFetchResult(
+                    final_url=current_url,
+                    redirect_chain=redirect_chain,
+                    error=f"Audit deadline exhausted fetching {current_url}",
+                    is_timeout=True,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
+                )
+            hop_timeout = (hop_conn, hop_req)
+        else:
+            hop_timeout = timeout
+
+        try:
+            req_headers = dict(headers) if headers else None
+            resp = session.request(
+                method=method,
+                url=current_url,
+                headers=req_headers,
+                timeout=hop_timeout,
+                allow_redirects=False,
+                stream=stream,
+            )
+        except requests.exceptions.Timeout as exc:
+            return SafeFetchResult(
+                final_url=current_url,
+                redirect_chain=redirect_chain,
+                error=f"Request timed out for {current_url}: {exc}",
+                is_timeout=True,
+                duration_seconds=max(0.0, time.monotonic() - t0),
+            )
+        except requests.exceptions.ConnectionError as exc:
+            exc_str = str(exc)
+            if "Blocked by SSRF protection:" in exc_str:
+                clean_msg = exc_str.split("Blocked by SSRF protection:")[-1].strip(" :'\")")
+                return SafeFetchResult(
+                    final_url=current_url,
+                    redirect_chain=redirect_chain,
+                    error=f"Blocked by SSRF protection: {clean_msg}",
+                    is_ssrf_blocked=True,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
+                )
+            return SafeFetchResult(
+                final_url=current_url,
+                redirect_chain=redirect_chain,
+                error=f"Connection error for {current_url}: {exc}",
+                is_connection_error=True,
+                duration_seconds=max(0.0, time.monotonic() - t0),
+            )
+        except requests.exceptions.RequestException as exc:
+            return SafeFetchResult(
+                final_url=current_url,
+                redirect_chain=redirect_chain,
+                error=f"Request error for {current_url}: {exc}",
+                is_connection_error=True,
+                duration_seconds=max(0.0, time.monotonic() - t0),
+            )
+        except Exception as exc:
+            return SafeFetchResult(
+                final_url=current_url,
+                redirect_chain=redirect_chain,
+                error=f"Unexpected error for {current_url}: {exc}",
+                is_connection_error=True,
+                duration_seconds=max(0.0, time.monotonic() - t0),
+            )
+
+        location_header = resp.headers.get("Location") or resp.headers.get("location")
+        if (resp.is_redirect or resp.status_code in (301, 302, 303, 307, 308)) and location_header:
+            redirect_chain.append(current_url)
+            if hop >= max_redirects:
+                return SafeFetchResult(
+                    response=resp,
+                    final_url=current_url,
+                    redirect_chain=redirect_chain,
+                    error=f"Too many redirects ({len(redirect_chain)} hops) fetching {url}",
+                    is_too_many_redirects=True,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
+                )
+
+            next_url = urllib.parse.urljoin(current_url, location_header)
+            next_parsed = urllib.parse.urlparse(next_url)
+            if next_parsed.scheme not in ("http", "https"):
+                return SafeFetchResult(
+                    response=resp,
+                    final_url=next_url,
+                    redirect_chain=redirect_chain,
+                    error=f"Blocked redirect to unsupported scheme '{next_parsed.scheme}'",
+                    is_ssrf_blocked=True,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
+                )
+            next_hostname = next_parsed.hostname or ""
+
+            # Validate redirect target against SSRF
+            check_allow_private = allow_private_ips and not block_private_redirects
+            disallowed, reason, next_ips = resolve_and_validate_destination(
+                next_hostname,
+                allow_private_ips=check_allow_private,
+            )
+            if disallowed:
+                return SafeFetchResult(
+                    response=resp,
+                    final_url=next_url,
+                    redirect_chain=redirect_chain,
+                    error=f"Blocked by SSRF protection on redirect to {next_url}: {reason}",
+                    is_ssrf_blocked=True,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
+                )
+            if pin_manager and next_ips:
+                pin_manager.pin(next_hostname, next_ips[0])
+
+            current_url = next_url
+            continue
+        else:
+            break
+
+    if resp is None:
+        return SafeFetchResult(
+            final_url=current_url,
+            redirect_chain=redirect_chain,
+            error=f"No response received for {url}",
+            is_connection_error=True,
+            duration_seconds=max(0.0, time.monotonic() - t0),
+        )
+
+    if resp.is_redirect:
+        return SafeFetchResult(
+            response=resp,
+            final_url=current_url,
+            redirect_chain=redirect_chain,
+            error=f"Too many redirects ({len(redirect_chain)} hops) fetching {url}",
+            is_too_many_redirects=True,
+            duration_seconds=max(0.0, time.monotonic() - t0),
+        )
+
+    return SafeFetchResult(
+        response=resp,
+        final_url=current_url,
+        redirect_chain=redirect_chain,
+        duration_seconds=max(0.0, time.monotonic() - t0),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +1037,10 @@ class RobotsTxtCache:
     """Fetches and caches robots.txt parsers per origin (scheme + host + port).
 
     Provides:
-      - can_fetch(url, agent)       — standard robots.txt agent check
+      - can_fetch(url, agent)         — standard robots.txt agent check (fails closed)
+      - get_robots_state(url)         — explicit RobotsState enum
       - get_disallowed_ai_agents(url) — list of AI crawlers that are blocked
-      - get_sitemaps(url)           — sitemap URLs declared in robots.txt
+      - get_sitemaps(url)             — sitemap URLs declared in robots.txt
     """
 
     def __init__(
@@ -316,75 +1048,164 @@ class RobotsTxtCache:
         session: requests.Session,
         rate_limiter: RateLimiter,
         allow_private_ips: bool = False,
+        block_private_redirects: bool = True,
+        pin_manager: Optional[DestinationPinningManager] = None,
+        deadline: Optional[AuditDeadline] = None,
     ) -> None:
         self._session = session
         self._limiter = rate_limiter
         self._allow_private_ips = allow_private_ips
-        self._cache: dict[str, urllib.robotparser.RobotFileParser] = {}
-        self._raw_cache: dict[str, str] = {}
+        self._block_private_redirects = block_private_redirects
+        self.deadline = deadline
+        self._pin_manager = (
+            pin_manager
+            or getattr(session.adapters.get("https://"), "pin_manager", None)
+            or getattr(session.adapters.get("http://"), "pin_manager", None)
+            or DestinationPinningManager()
+        )
+        self._cache: dict[str, RobotsEntry] = {}
         self._lock = threading.Lock()
+
+    def set_deadline(self, deadline: Optional[AuditDeadline]) -> None:
+        """Update or establish the shared authoritative deadline."""
+        self.deadline = deadline
 
     def _origin(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
-        port = f":{parsed.port}" if parsed.port else ""
-        return f"{parsed.scheme}://{parsed.hostname}{port}"
+        return f"{parsed.scheme}://{parsed.netloc}"
 
-    def _fetch_robots(self, origin: str) -> tuple[urllib.robotparser.RobotFileParser, str]:
+    def _fetch_robots(self, origin: str, deadline: Optional[AuditDeadline] = None) -> RobotsEntry:
+        eff_deadline = deadline or self.deadline
+        if eff_deadline and eff_deadline.expired():
+            logger.warning("Audit deadline expired before fetching robots.txt for %s", origin)
+            return RobotsEntry(state=RobotsState.UNAVAILABLE, error="Audit deadline expired")
+
         robots_url = f"{origin}/robots.txt"
-        parser = urllib.robotparser.RobotFileParser()
-        parser.set_url(robots_url)
-        raw = ""
-        try:
-            host = urllib.parse.urlparse(origin).hostname or origin
-            if not self._allow_private_ips:
-                blocked, _ = is_ssrf_disallowed(host)
-                if blocked:
-                    parser.allow_all = False
-                    return parser, ""
-            self._limiter.wait(host)
-            resp = self._session.get(
-                robots_url,
-                timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
-                allow_redirects=True,
-            )
-            if resp.status_code == 200:
-                raw = resp.text
-                parser.parse(raw.splitlines())
-            else:
-                # Non-200 means assume all allowed (per RFC)
-                parser.allow_all = True
-        except Exception as exc:
-            logger.debug("robots.txt fetch failed for %s: %s", origin, exc)
-            parser.allow_all = True
-        return parser, raw
+        fetch_res = _safe_fetch_with_redirects(
+            session=self._session,
+            method="GET",
+            url=robots_url,
+            pin_manager=self._pin_manager,
+            allow_private_ips=self._allow_private_ips,
+            block_private_redirects=self._block_private_redirects,
+            max_redirects=5,
+            limiter=self._limiter,
+            timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+            stream=False,
+            deadline=eff_deadline,
+        )
 
-    def _get_parser(self, url: str) -> tuple[urllib.robotparser.RobotFileParser, str]:
+        if fetch_res.is_ssrf_blocked:
+            logger.warning("SSRF blocked robots.txt fetch for %s: %s", origin, fetch_res.error)
+            return RobotsEntry(state=RobotsState.BLOCKED, error=fetch_res.error)
+
+        if fetch_res.is_too_many_redirects:
+            logger.warning("Redirect loop/exceeded fetching robots.txt for %s: %s", origin, fetch_res.error)
+            return RobotsEntry(state=RobotsState.INVALID, error=fetch_res.error)
+
+        if fetch_res.is_timeout or fetch_res.is_connection_error:
+            logger.warning("Network/transport error fetching robots.txt for %s: %s", origin, fetch_res.error)
+            return RobotsEntry(state=RobotsState.UNAVAILABLE, error=fetch_res.error)
+
+        resp = fetch_res.response
+        if resp is None:
+            logger.warning("No response for robots.txt at %s: %s", origin, fetch_res.error)
+            return RobotsEntry(state=RobotsState.UNAVAILABLE, error=fetch_res.error or "No response")
+
+        # RFC 9309 Status code semantics
+        if 200 <= resp.status_code < 300:
+            raw = resp.text
+            try:
+                parser = urllib.robotparser.RobotFileParser()
+                parser.set_url(robots_url)
+                parser.parse(raw.splitlines())
+                return RobotsEntry(state=RobotsState.ALLOWED, parser=parser, raw=raw)
+            except Exception as exc:
+                logger.warning("Failed to parse robots.txt for %s: %s", origin, exc)
+                return RobotsEntry(state=RobotsState.INVALID, raw=raw, error=str(exc))
+
+        elif 400 <= resp.status_code < 500:
+            # Per RFC 9309 section 2.3.1.2: 4xx means robots.txt does not exist; access is unrestricted
+            logger.info("robots.txt for %s returned HTTP %s; crawling unrestricted per RFC 9309", origin, resp.status_code)
+            return RobotsEntry(state=RobotsState.ALLOWED, parser=None, raw="")
+
+        elif 500 <= resp.status_code < 600:
+            # Per RFC 9309 section 2.3.1.3: 5xx server error is a temporary failure -> disallow all
+            logger.warning("robots.txt for %s returned HTTP %s; disallowing crawl per RFC 9309", origin, resp.status_code)
+            return RobotsEntry(state=RobotsState.DISALLOWED, error=f"HTTP {resp.status_code}")
+
+        else:
+            logger.warning("robots.txt for %s returned unexpected HTTP %s; disallowing", origin, resp.status_code)
+            return RobotsEntry(state=RobotsState.DISALLOWED, error=f"Unexpected HTTP {resp.status_code}")
+
+    def _get_entry(self, url: str, deadline: Optional[AuditDeadline] = None) -> RobotsEntry:
         origin = self._origin(url)
         with self._lock:
             if origin not in self._cache:
-                parser, raw = self._fetch_robots(origin)
-                self._cache[origin] = parser
-                self._raw_cache[origin] = raw
-            return self._cache[origin], self._raw_cache[origin]
+                self._cache[origin] = self._fetch_robots(origin, deadline=deadline)
+            return self._cache[origin]
 
-    def can_fetch(self, url: str, agent: str = USER_AGENT) -> bool:
-        """Return True if the given agent is allowed to fetch this URL."""
+    def _get_parser(self, url: str) -> tuple[Optional[urllib.robotparser.RobotFileParser], str]:
+        """Backward-compatible helper returning (parser, raw)."""
+        entry = self._get_entry(url)
+        return entry.parser, entry.raw
+
+    def get_robots_state(self, url: str, deadline: Optional[AuditDeadline] = None) -> RobotsState:
+        """Return the explicit RobotsState enum for the origin of url."""
+        return self._get_entry(url, deadline=deadline).state
+
+    def can_fetch(
+        self,
+        url: str,
+        agent: str = USER_AGENT,
+        deadline: Optional[AuditDeadline] = None,
+    ) -> bool:
+        """Return True if the given agent is allowed to fetch this URL under robots.txt policy."""
         try:
-            parser, _ = self._get_parser(url)
-            if getattr(parser, "allow_all", False):
-                return True
-            return parser.can_fetch(agent, url)
+            eff_deadline = deadline or self.deadline
+            if eff_deadline and eff_deadline.expired():
+                logger.warning("Audit deadline expired checking robots policy for %s", url)
+                return False  # fail closed
+
+            entry = self._get_entry(url, deadline=eff_deadline)
+            if entry.state == RobotsState.BLOCKED:
+                logger.warning("robots.txt blocked by SSRF for %s: %s", url, entry.error)
+                return False
+            if entry.state == RobotsState.UNAVAILABLE:
+                logger.warning("robots.txt unavailable (transport error) for %s: %s", url, entry.error)
+                return False
+            if entry.state == RobotsState.INVALID:
+                logger.warning("robots.txt invalid (redirect/parser error) for %s: %s", url, entry.error)
+                return False
+            if entry.state == RobotsState.DISALLOWED:
+                logger.info("robots.txt disallows crawling for %s: %s", url, entry.error)
+                return False
+            if entry.state == RobotsState.ALLOWED:
+                if entry.parser is None:
+                    # 4xx or unrestricted robots.txt per RFC 9309
+                    return True
+                try:
+                    return bool(entry.parser.can_fetch(agent, url))
+                except Exception as exc:
+                    logger.warning("Parser error evaluating can_fetch(%s, %s): %s", agent, url, exc)
+                    return False  # fail closed
+            return False
         except Exception as exc:
-            logger.debug("can_fetch check failed for %s: %s", url, exc)
-            return True  # fail open
+            logger.warning("Unexpected error evaluating robots policy for %s: %s", url, exc)
+            return False  # fail closed
 
     def get_disallowed_ai_agents(self, url: str) -> list[str]:
         """Return list of known AI crawlers that are explicitly Disallowed."""
         try:
-            _, raw = self._get_parser(url)
+            entry = self._get_entry(url)
+            # Epistemic honesty: only evaluate explicit disallows when robots.txt was successfully
+            # retrieved and parsed. Network failure, malformed syntax, or SSRF blocks must not be
+            # reported as explicit AI-crawler disallows.
+            if entry.state != RobotsState.ALLOWED or not entry.raw:
+                return []
             blocked: list[str] = []
             for crawler in KNOWN_AI_CRAWLERS:
-                if not self._agent_allowed_in_raw(raw, crawler, url):
+                if not self._agent_allowed_in_raw(entry.raw, crawler, url):
                     blocked.append(crawler)
             return blocked
         except Exception as exc:
@@ -398,14 +1219,18 @@ class RobotsTxtCache:
             tmp_parser.parse(raw.splitlines())
             return tmp_parser.can_fetch(agent, url)
         except Exception:
+            # Epistemic honesty: on parser error / malformed line, do not falsely conclude
+            # that this agent is explicitly disallowed by policy.
             return True
 
     def get_sitemaps(self, url: str) -> list[str]:
         """Return all Sitemap: URLs declared in robots.txt for this origin."""
         try:
-            _, raw = self._get_parser(url)
+            entry = self._get_entry(url)
+            if not entry.raw:
+                return []
             sitemaps: list[str] = []
-            for line in raw.splitlines():
+            for line in entry.raw.splitlines():
                 stripped = line.strip()
                 if stripped.lower().startswith("sitemap:"):
                     sitemap_url = stripped.split(":", 1)[1].strip()
@@ -436,21 +1261,39 @@ class HttpClient:
     def __init__(
         self,
         rate_limit_secs: float = RATE_LIMIT_SECS,
-        allow_private_ips: Optional[bool] = None,
+        allow_private_ips: bool = False,
         block_private_redirects: bool = True,
+        deadline: Optional[AuditDeadline] = None,
     ) -> None:
-        if allow_private_ips is None:
-            env_val = os.environ.get("ALLOW_PRIVATE_IPS", "").lower()
-            if env_val in ("1", "true", "yes"):
-                allow_private_ips = True
-            else:
-                allow_private_ips = bool(_HTTP_CFG.get("allow_private_ips", False))
-
-        self._allow_private_ips = allow_private_ips
+        self._allow_private_ips = bool(allow_private_ips)
         self._block_private_redirects = block_private_redirects
+        self.deadline = deadline
         self._limiter = RateLimiter(interval=rate_limit_secs)
+        self._pin_manager = DestinationPinningManager()
         self._session = self._build_session()
-        self.robots = RobotsTxtCache(self._session, self._limiter, allow_private_ips=self._allow_private_ips)
+        self.verify_transport_security()
+        self.robots = RobotsTxtCache(
+            session=self._session,
+            rate_limiter=self._limiter,
+            allow_private_ips=self._allow_private_ips,
+            block_private_redirects=self._block_private_redirects,
+            pin_manager=self._pin_manager,
+            deadline=self.deadline,
+        )
+
+    def verify_transport_security(self) -> bool:
+        """Verify that the underlying requests.Session has SSRFSafeHTTPAdapter mounted on HTTP and HTTPS."""
+        http_adapter = self._session.adapters.get("http://")
+        https_adapter = self._session.adapters.get("https://")
+        is_safe = isinstance(http_adapter, SSRFSafeHTTPAdapter) and isinstance(https_adapter, SSRFSafeHTTPAdapter)
+        if not is_safe:
+            logger.error("Security invariant violation: HttpClient session lacks SSRFSafeHTTPAdapter wiring!")
+        return is_safe
+
+    def set_deadline(self, deadline: Optional[AuditDeadline]) -> None:
+        """Update or establish the shared authoritative deadline across client and robots cache."""
+        self.deadline = deadline
+        self.robots.set_deadline(deadline)
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
@@ -462,7 +1305,11 @@ class HttpClient:
             status=0,
             raise_on_status=False,
         )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        adapter = SSRFSafeHTTPAdapter(
+            pin_manager=self._pin_manager,
+            allow_private_ips=self._allow_private_ips,
+            max_retries=retry_strategy,
+        )
         session.mount("https://", adapter)
         session.mount("http://", adapter)
         return session
@@ -485,104 +1332,73 @@ class HttpClient:
         skip_robots_check: bool = False,
         stream: bool = False,
         headers: Optional[dict] = None,
+        deadline: Optional[AuditDeadline] = None,
     ) -> PageResult:
-        """Perform a rate-limited, robots-compliant HTTP GET with SSRF and redirect validation."""
+        """Perform a rate-limited, robots-compliant HTTP GET with SSRF, redirect, and deadline validation."""
         result = PageResult(url=url)
+        eff_deadline = deadline or self.deadline
 
-        # --- SSRF check on target URL ---
-        if not self._allow_private_ips:
-            target_host = urllib.parse.urlparse(url).hostname or ""
-            disallowed, reason = is_ssrf_disallowed(target_host)
-            if disallowed:
-                result.error = f"Blocked by SSRF protection: {reason}"
-                logger.warning("SSRF blocked: %s (%s)", url, reason)
-                return result
+        if eff_deadline and eff_deadline.expired():
+            result.error = f"Audit deadline expired before fetching {url}"
+            result.robots_allowed = False
+            return result
 
         # --- robots.txt check ---
         if not skip_robots_check:
-            allowed = self.robots.can_fetch(url)
+            allowed = self.robots.can_fetch(url, deadline=eff_deadline)
             result.robots_allowed = allowed
             if not allowed:
-                result.error = f"robots.txt disallows fetching: {url}"
-                logger.info("Blocked by robots.txt: %s", url)
-                return result
-
-        # --- rate limit ---
-        try:
-            self._limiter.wait(self._host(url))
-        except Exception as exc:
-            logger.debug("Rate limiter error for %s: %s", url, exc)
-
-        # --- HTTP GET with SSRF and redirect protection ---
-        t0 = time.monotonic()
-        current_url = url
-        redirect_chain: list[str] = []
-        max_redirects = 5
-        resp = None
-
-        try:
-            for _ in range(max_redirects + 1):
-                parsed = urllib.parse.urlparse(current_url)
-                hostname = parsed.hostname or ""
-
-                # Check SSRF on current_url
-                if not self._allow_private_ips:
-                    disallowed, reason = is_ssrf_disallowed(hostname)
-                    if disallowed:
-                        result.fetch_duration_seconds = time.monotonic() - t0
-                        result.error = f"Blocked by SSRF protection: {reason}"
-                        logger.warning("SSRF blocked: %s (%s)", current_url, reason)
-                        return result
-
-                req_headers = {}
-                if headers:
-                    req_headers.update(headers)
-
-                resp = self._session.get(
-                    current_url,
-                    headers=req_headers if req_headers else None,
-                    timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
-                    allow_redirects=False,
-                    stream=True,
-                )
-
-                if resp.is_redirect and "Location" in resp.headers:
-                    redirect_chain.append(current_url)
-                    next_url = urllib.parse.urljoin(current_url, resp.headers["Location"])
-                    next_hostname = urllib.parse.urlparse(next_url).hostname or ""
-
-                    # Check SSRF on redirect target
-                    disallowed, reason = is_ssrf_disallowed(next_hostname)
-                    if disallowed and (not self._allow_private_ips or self._block_private_redirects):
-                        result.fetch_duration_seconds = time.monotonic() - t0
-                        result.error = f"Blocked by SSRF protection on redirect to {next_url}: {reason}"
-                        result.redirect_chain = redirect_chain
-                        logger.warning("SSRF blocked redirect: %s -> %s (%s)", current_url, next_url, reason)
-                        return result
-
-                    current_url = next_url
-                    continue
+                entry = self.robots._get_entry(url, deadline=eff_deadline)
+                if entry.state == RobotsState.BLOCKED:
+                    result.error = f"Blocked by SSRF protection (robots.txt): {entry.error or 'disallowed destination'}"
                 else:
-                    break
-
-            if resp is None:
-                result.error = f"No response received for {url}"
+                    result.error = f"robots.txt disallows fetching ({entry.state.value}): {url}"
+                logger.info("Blocked by robots.txt (%s): %s", entry.state.value, url)
                 return result
 
-            result.fetch_duration_seconds = time.monotonic() - t0
-            result.status_code = resp.status_code
-            result.url = current_url
-            result.redirect_chain = redirect_chain
-            if resp.is_redirect:
-                result.error = f"Too many redirects ({len(redirect_chain)} hops) fetching {url}"
-            result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
-            content_type_full = resp.headers.get("Content-Type", "")
-            result.content_type = content_type_full.split(";")[0].strip().lower()
+        fetch_res = _safe_fetch_with_redirects(
+            session=self._session,
+            method="GET",
+            url=url,
+            pin_manager=self._pin_manager,
+            allow_private_ips=self._allow_private_ips,
+            block_private_redirects=self._block_private_redirects,
+            max_redirects=5,
+            headers=headers,
+            stream=True,
+            timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+            limiter=self._limiter,
+            deadline=eff_deadline,
+        )
 
-            # Read body with size cap (streaming strictly up to MAX_RESPONSE_BYTES)
+        result.fetch_duration_seconds = max(0.0, fetch_res.duration_seconds)
+        result.url = fetch_res.final_url or url
+        result.redirect_chain = fetch_res.redirect_chain
+
+        if fetch_res.error:
+            result.error = fetch_res.error
+            if not fetch_res.response:
+                return result
+
+        resp = fetch_res.response
+        if resp is None:
+            if not result.error:
+                result.error = f"No response received for {url}"
+            return result
+
+        result.status_code = resp.status_code
+        result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
+        content_type_full = resp.headers.get("Content-Type", "")
+        result.content_type = content_type_full.split(";")[0].strip().lower()
+
+        # Read body with size cap (streaming strictly up to MAX_RESPONSE_BYTES)
+        try:
             chunks: list[bytes] = []
             total = 0
             for chunk in resp.iter_content(chunk_size=65536):
+                if eff_deadline and eff_deadline.expired():
+                    result.error = f"Audit deadline expired while reading response body from {url}"
+                    break
                 total += len(chunk)
                 if total > MAX_RESPONSE_BYTES:
                     excess = total - MAX_RESPONSE_BYTES
@@ -603,19 +1419,19 @@ class HttpClient:
             if not encoding:
                 if raw_bytes.startswith(b"\xef\xbb\xbf"):
                     encoding = "utf-8-sig"
-                elif raw_bytes.startswith(b"\xff\xfe"):
-                    encoding = "utf-16-le"
-                elif raw_bytes.startswith(b"\xfe\xff"):
-                    encoding = "utf-16-be"
-
-            if not encoding:
-                meta_head = raw_bytes[:2048].lower()
-                m = re.search(rb'<meta[^>]+charset=["\']?([a-zA-Z0-9_-]+)', meta_head)
-                if m:
-                    try:
-                        encoding = m.group(1).decode("ascii")
-                    except Exception:
-                        pass
+                elif raw_bytes.startswith(b"\xff\xfe") or raw_bytes.startswith(b"\xfe\xff"):
+                    encoding = "utf-16"
+                else:
+                    meta_match = re.search(
+                        rb'<meta[^>]+charset=["\']?([a-zA-Z0-9_-]+)',
+                        raw_bytes[:2048],
+                        re.IGNORECASE,
+                    )
+                    if meta_match:
+                        try:
+                            encoding = meta_match.group(1).decode("ascii", errors="ignore").strip()
+                        except Exception:
+                            pass
 
             if not encoding:
                 encoding = resp.encoding or "utf-8"
@@ -623,101 +1439,66 @@ class HttpClient:
             try:
                 result.html = raw_bytes.decode(encoding, errors="replace")
             except (LookupError, UnicodeDecodeError):
-                try:
-                    result.html = raw_bytes.decode("utf-8", errors="replace")
-                except Exception:
-                    result.html = raw_bytes.decode("latin-1", errors="replace")
+                result.html = raw_bytes.decode("utf-8", errors="replace")
 
-            # Parse HTML with BeautifulSoup only for HTML content
-            if result.is_html and result.html:
-                result.soup = self._parse_html(result.html)
-
-        except requests.exceptions.Timeout as exc:
-            result.fetch_duration_seconds = time.monotonic() - t0
-            result.error = f"Timeout fetching {url}: {exc}"
-            logger.warning(result.error)
-        except requests.exceptions.TooManyRedirects as exc:
-            result.fetch_duration_seconds = time.monotonic() - t0
-            result.error = f"Too many redirects for {url}: {exc}"
-            logger.warning(result.error)
-        except requests.exceptions.ConnectionError as exc:
-            result.fetch_duration_seconds = time.monotonic() - t0
-            result.error = f"Connection error for {url}: {exc}"
-            logger.warning(result.error)
+            result.soup = self._parse_html(result.html)
         except Exception as exc:
-            result.fetch_duration_seconds = time.monotonic() - t0
-            result.error = f"Unexpected error fetching {url}: {exc}"
-            logger.exception(result.error)
+            result.error = f"Error reading response body from {url}: {exc}"
+            logger.warning(result.error)
         finally:
-            if resp is not None:
-                try:
-                    resp.close()
-                except Exception:
-                    pass
+            try:
+                resp.close()
+            except Exception:
+                pass
 
         return result
 
-    def head(self, url: str) -> PageResult:
-        """Perform a lightweight HTTP HEAD request with SSRF and redirect protection."""
+    def head(
+        self,
+        url: str,
+        deadline: Optional[AuditDeadline] = None,
+    ) -> PageResult:
+        """Perform a lightweight HTTP HEAD request with SSRF, redirect, and deadline protection."""
         result = PageResult(url=url)
-        t0 = time.monotonic()
-        current_url = url
-        redirect_chain: list[str] = []
-        max_redirects = 5
-        resp = None
+        eff_deadline = deadline or self.deadline
 
-        try:
-            for _ in range(max_redirects + 1):
-                parsed = urllib.parse.urlparse(current_url)
-                hostname = parsed.hostname or ""
+        if eff_deadline and eff_deadline.expired():
+            result.error = f"Audit deadline expired before HEAD {url}"
+            return result
 
-                if not self._allow_private_ips:
-                    disallowed, reason = is_ssrf_disallowed(hostname)
-                    if disallowed:
-                        result.fetch_duration_seconds = time.monotonic() - t0
-                        result.error = f"HEAD blocked by SSRF protection: {reason}"
-                        return result
+        fetch_res = _safe_fetch_with_redirects(
+            session=self._session,
+            method="HEAD",
+            url=url,
+            pin_manager=self._pin_manager,
+            allow_private_ips=self._allow_private_ips,
+            block_private_redirects=self._block_private_redirects,
+            max_redirects=5,
+            limiter=self._limiter,
+            timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+            stream=False,
+            deadline=eff_deadline,
+        )
 
-                self._limiter.wait(self._host(current_url))
-                resp = self._session.head(
-                    current_url,
-                    timeout=(CONNECT_TIMEOUT, REQUEST_TIMEOUT),
-                    allow_redirects=False,
-                )
+        result.fetch_duration_seconds = max(0.0, fetch_res.duration_seconds)
+        result.url = fetch_res.final_url or url
+        result.redirect_chain = fetch_res.redirect_chain
 
-                if resp.is_redirect and "Location" in resp.headers:
-                    redirect_chain.append(current_url)
-                    next_url = urllib.parse.urljoin(current_url, resp.headers["Location"])
-                    next_hostname = urllib.parse.urlparse(next_url).hostname or ""
+        if fetch_res.error:
+            result.error = fetch_res.error
+            if not fetch_res.response:
+                return result
 
-                    disallowed, reason = is_ssrf_disallowed(next_hostname)
-                    if disallowed and (not self._allow_private_ips or self._block_private_redirects):
-                        result.fetch_duration_seconds = time.monotonic() - t0
-                        result.error = f"HEAD blocked by SSRF protection on redirect to {next_url}: {reason}"
-                        result.redirect_chain = redirect_chain
-                        return result
+        resp = fetch_res.response
+        if resp is None:
+            if not result.error:
+                result.error = f"No response received for {url}"
+            return result
 
-                    current_url = next_url
-                    continue
-                else:
-                    break
-
-            if resp is not None:
-                result.fetch_duration_seconds = time.monotonic() - t0
-                result.status_code = resp.status_code
-                result.url = current_url
-                result.redirect_chain = redirect_chain
-                if resp.is_redirect:
-                    result.error = f"Too many redirects ({len(redirect_chain)} hops) for {url}"
-                result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
-                content_type_full = resp.headers.get("Content-Type", "")
-                result.content_type = content_type_full.split(";")[0].strip().lower()
-        except requests.exceptions.Timeout as exc:
-            result.error = f"HEAD timeout for {url}: {exc}"
-        except requests.exceptions.ConnectionError as exc:
-            result.error = f"HEAD connection error for {url}: {exc}"
-        except Exception as exc:
-            result.error = f"HEAD unexpected error for {url}: {exc}"
+        result.status_code = resp.status_code
+        result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
+        content_type_full = resp.headers.get("Content-Type", "")
+        result.content_type = content_type_full.split(";")[0].strip().lower()
         return result
 
     def close(self) -> None:
@@ -757,18 +1538,17 @@ class PlaywrightRenderer:
         self,
         rate_limiter: Optional[RateLimiter] = None,
         robots_cache: Optional[RobotsTxtCache] = None,
-        allow_private_ips: Optional[bool] = None,
+        allow_private_ips: bool = False,
+        block_private_subrequests: bool = False,
+        deadline: Optional[AuditDeadline] = None,
+        session: Optional[requests.Session] = None,
+        pin_manager: Optional[DestinationPinningManager] = None,
     ) -> None:
-        if allow_private_ips is None:
-            env_val = os.environ.get("ALLOW_PRIVATE_IPS", "").lower()
-            if env_val in ("1", "true", "yes"):
-                allow_private_ips = True
-            else:
-                allow_private_ips = bool(_HTTP_CFG.get("allow_private_ips", False))
-
-        self._allow_private_ips = allow_private_ips
+        self._allow_private_ips = bool(allow_private_ips)
+        self._block_private_subrequests = bool(block_private_subrequests)
         self._limiter = rate_limiter
         self._robots = robots_cache
+        self.deadline = deadline
         self._playwright = None
         self._browser = None
         self._available = self._check_availability()
@@ -824,6 +1604,7 @@ class PlaywrightRenderer:
         url: str,
         wait_ms: int = PLAYWRIGHT_WAIT_MS,
         page_result: Optional[PageResult] = None,
+        deadline: Optional[AuditDeadline] = None,
     ) -> PageResult:
         """Render a page with Playwright and return the post-JS DOM.
 
@@ -831,16 +1612,26 @@ class PlaywrightRenderer:
             url: The absolute URL to render.
             wait_ms: Milliseconds to wait after page load for JS execution.
             page_result: Optional existing PageResult to populate in-place.
+            deadline: Optional AuditDeadline bounding navigation and wait windows.
 
         Returns:
             PageResult with rendered_html, rendered_soup, network_requests,
             performance_metrics, render_error populated.
         """
         result = page_result if page_result is not None else PageResult(url=url)
+        eff_deadline = deadline or self.deadline
+
+        if eff_deadline and eff_deadline.expired():
+            result.render_error = f"Audit deadline expired before rendering {url}"
+            result.render_confidence = "low"
+            result.render_state = RenderState.RENDER_FAILED
+            return result
+
         if not self._available:
             result.render_error = "Playwright not installed; render skipped."
             result.error = result.error or result.render_error
             result.render_confidence = "low"
+            result.render_state = RenderState.RENDER_UNAVAILABLE
             return result
 
         parsed = urllib.parse.urlparse(url)
@@ -852,22 +1643,24 @@ class PlaywrightRenderer:
             if disallowed:
                 result.render_error = f"Blocked by SSRF protection: {reason}"
                 result.render_confidence = "low"
+                result.render_state = RenderState.BLOCKED
                 logger.warning("SSRF blocked in PlaywrightRenderer: %s (%s)", url, reason)
                 return result
 
         # --- Robots.txt Check ---
         if self._robots is not None:
-            if not self._robots.can_fetch(url):
+            if not self._robots.can_fetch(url, deadline=eff_deadline):
                 result.render_error = f"robots.txt disallows rendering: {url}"
                 result.render_confidence = "low"
+                result.render_state = RenderState.BLOCKED
                 logger.info("Blocked by robots.txt in renderer: %s", url)
                 return result
 
         # --- Shared Rate Limiter Check ---
         if self._limiter is not None:
             t0_pace = time.monotonic()
-            self._limiter.wait(target_host or url)
-            paced_time = time.monotonic() - t0_pace
+            self._limiter.wait(target_host or url, deadline=eff_deadline)
+            paced_time = max(0.0, time.monotonic() - t0_pace)
             if paced_time > 0.05:
                 logger.info("Renderer rate limiter paced host %s (slept %.3fs)", target_host, paced_time)
 
@@ -875,6 +1668,9 @@ class PlaywrightRenderer:
         network_requests: list[dict] = []
         req_entry_map: dict[Any, dict] = {}
         ssrf_abort_events: list[tuple[str, str]] = []
+        method_abort_events: list[tuple[str, str]] = []
+        budget_abort_events: list[tuple[str, int]] = []
+        redirect_abort_events: list[tuple[str, int]] = []
 
         try:
             self._ensure_browser()
@@ -883,25 +1679,189 @@ class PlaywrightRenderer:
                 result.render_confidence = "low"
                 return result
 
+            # Service workers blocked engine-wide to prevent policy/interception bypass
             context = self._browser.new_context(
                 viewport=PLAYWRIGHT_VIEWPORT,
                 user_agent=USER_AGENT,
+                service_workers="block",
             )
 
-            # SSRF Route Interception: protects all subrequests and mid-navigation redirects
-            if not self._allow_private_ips:
-                def intercept_route(route):
-                    req_url = route.request.url
-                    req_host = urllib.parse.urlparse(req_url).hostname or ""
-                    is_blocked, block_reason = is_ssrf_disallowed(req_host)
+            # Security Route Interceptor:
+            # 1. Global audit deadline enforcement
+            # 2. Strict read-only HTTP method policy (GET, HEAD, OPTIONS only)
+            # 3. Request count budget per render (MAX_BROWSER_REQUESTS_PER_PAGE)
+            # 4. Redirect hop budget per chain (MAX_BROWSER_REDIRECTS)
+            # 5. SSRF protection on all destinations (subrequests, scripts, frames, redirects)
+            request_counter = 0
+
+            def intercept_route(route):
+                nonlocal request_counter
+                req = route.request
+                req_url = req.url
+                method = req.method.upper()
+
+                # 1. Global audit deadline check
+                if eff_deadline and eff_deadline.expired():
+                    logger.debug("Audit deadline expired; aborting browser route %s", req_url)
+                    route.abort("timedout")
+                    return
+
+                # 2. HTTP method policy: Marketplace is strictly read-only
+                if method not in ALLOWED_BROWSER_METHODS:
+                    logger.warning("Blocked non-read-only method in Playwright: %s %s", method, req_url)
+                    method_abort_events.append((req_url, method))
+                    route.abort("blockedbyclient")
+                    return
+
+                # 3. Network request budget per page render
+                request_counter += 1
+                if request_counter > MAX_BROWSER_REQUESTS_PER_PAGE:
+                    logger.warning(
+                        "Browser request budget exceeded (%d > %d): aborting %s",
+                        request_counter, MAX_BROWSER_REQUESTS_PER_PAGE, req_url,
+                    )
+                    budget_abort_events.append((req_url, request_counter))
+                    route.abort("blockedbyclient")
+                    return
+
+                # 4. Redirect hop budget
+                chain_len = 0
+                cur_req = req.redirected_from
+                while cur_req:
+                    chain_len += 1
+                    cur_req = cur_req.redirected_from
+                if chain_len > MAX_BROWSER_REDIRECTS:
+                    logger.warning(
+                        "Browser redirect budget exceeded (%d > %d): aborting %s",
+                        chain_len, MAX_BROWSER_REDIRECTS, req_url,
+                    )
+                    redirect_abort_events.append((req_url, chain_len))
+                    route.abort("failed")
+                    return
+
+                # 5. Scheme Filtering: In-memory schemes continue; non-HTTP schemes abort
+                parsed_req = urllib.parse.urlparse(req_url)
+                if parsed_req.scheme in ("data", "blob", "about"):
+                    route.continue_()
+                    return
+
+                if parsed_req.scheme not in ("http", "https"):
+                    logger.warning("Blocked non-HTTP browser scheme: %s in %s", parsed_req.scheme, req_url)
+                    method_abort_events.append((req_url, f"SCHEME:{parsed_req.scheme}"))
+                    route.abort("blockedbyclient")
+                    return
+
+                # 6. SSRF Destination Validation & Pre-fetch Pinning (Anti-TOCTOU)
+                req_host = parsed_req.hostname or ""
+                disallow_dest = not self._allow_private_ips or (
+                    self._block_private_subrequests and req_url != url
+                )
+                if disallow_dest:
+                    is_blocked, block_reason, valid_ips = resolve_and_validate_destination(
+                        req_host, allow_private_ips=False
+                    )
                     if is_blocked:
                         logger.warning("SSRF blocked route in Playwright: %s (%s)", req_url, block_reason)
                         ssrf_abort_events.append((req_url, block_reason))
                         route.abort("accessdenied")
                         return
-                    route.continue_()
+                    if valid_ips and self._pin_manager:
+                        self._pin_manager.pin(req_host, valid_ips[0])
+                else:
+                    if self._pin_manager:
+                        _, _, valid_ips = resolve_and_validate_destination(
+                            req_host, allow_private_ips=True
+                        )
+                        if valid_ips:
+                            self._pin_manager.pin(req_host, valid_ips[0])
 
-                context.route("**/*", intercept_route)
+                # 7. Shared Rate Limiting
+                if self._limiter is not None and req_host:
+                    try:
+                        self._limiter.wait(req_host, deadline=eff_deadline)
+                    except Exception:
+                        pass
+
+                # 8. Timeouts clamped to remaining AuditDeadline
+                if eff_deadline:
+                    c_conn, c_req = eff_deadline.child_timeout_tuple(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+                    if eff_deadline.expired() or eff_deadline.remaining() <= 0.001:
+                        route.abort("timedout")
+                        return
+                    hop_timeout = (c_conn, c_req)
+                else:
+                    hop_timeout = (CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+
+                # 9. Controlled Secure Fetch with DNS-Pinned Transport
+                fwd_headers = {}
+                for hk, hv in req.headers.items():
+                    if hk.lower() not in ("host", "connection", "content-length", "accept-encoding"):
+                        fwd_headers[hk] = hv
+
+                try:
+                    fetch_res = _safe_fetch_with_redirects(
+                        session=self._session,
+                        method=method,
+                        url=req_url,
+                        headers=fwd_headers,
+                        pin_manager=self._pin_manager,
+                        allow_private_ips=(self._allow_private_ips and not (self._block_private_subrequests and req_url != url)),
+                        block_private_redirects=True,
+                        max_redirects=max(1, MAX_BROWSER_REDIRECTS - chain_len),
+                        limiter=self._limiter,
+                        timeout=hop_timeout,
+                        stream=False,
+                        deadline=eff_deadline,
+                    )
+                except Exception as exc:
+                    logger.debug("Browser route fetch error for %s: %s", req_url, exc)
+                    route.abort("failed")
+                    return
+
+                if fetch_res.is_ssrf_blocked:
+                    logger.warning("SSRF blocked browser fetch for %s: %s", req_url, fetch_res.error)
+                    ssrf_abort_events.append((fetch_res.final_url or req_url, fetch_res.error or "SSRF blocked"))
+                    route.abort("accessdenied")
+                    return
+
+                if fetch_res.is_too_many_redirects:
+                    redirect_abort_events.append((req_url, len(fetch_res.redirect_chain)))
+                    route.abort("failed")
+                    return
+
+                if fetch_res.is_timeout:
+                    route.abort("timedout")
+                    return
+
+                if fetch_res.response is None:
+                    route.abort("failed")
+                    return
+
+                resp = fetch_res.response
+
+                # Clean response headers for browser fulfillment (strip hop-by-hop & compression)
+                clean_headers = {}
+                for k, v in resp.headers.items():
+                    if k.lower() in ("content-encoding", "transfer-encoding", "connection", "keep-alive"):
+                        continue
+                    clean_headers[k] = v
+
+                raw_body = resp.content or b""
+                if len(raw_body) > MAX_RESPONSE_BYTES:
+                    raw_body = raw_body[:MAX_RESPONSE_BYTES]
+                clean_headers["content-length"] = str(len(raw_body))
+
+                try:
+                    route.fulfill(
+                        status=resp.status_code,
+                        headers=clean_headers,
+                        body=raw_body,
+                    )
+                except Exception as fulfill_exc:
+                    logger.debug("Failed to fulfill route for %s: %s", req_url, fulfill_exc)
+                    route.abort("failed")
+
+            context.route("**/*", intercept_route)
 
             page = context.new_page()
 
@@ -920,37 +1880,59 @@ class PlaywrightRenderer:
                 entry = req_entry_map.get(resp.request)
                 if entry is not None:
                     entry["status"] = resp.status
-                    try:
-                        entry["timing"] = resp.request.timing
-                    except Exception:
-                        pass
+                    cl = resp.headers.get("content-length")
+                    if cl:
+                        try:
+                            size = int(cl)
+                            entry["size"] = size
+                            if size > MAX_RESPONSE_BYTES:
+                                entry["oversized"] = True
+                        except ValueError:
+                            pass
 
             def on_request_finished(req):
                 entry = req_entry_map.get(req)
                 if entry is not None:
                     try:
-                        entry["timing"] = req.timing
+                        t = req.timing
+                        if t:
+                            entry["timing"] = t
                     except Exception:
                         pass
 
             def on_request_failed(req):
                 entry = req_entry_map.get(req)
                 if entry is not None:
-                    if entry.get("status") is None:
-                        entry["status"] = 0
-                    try:
-                        entry["timing"] = req.timing
-                    except Exception:
-                        pass
+                    entry["status"] = 0
 
             page.on("request", on_request)
             page.on("response", on_response)
             page.on("requestfinished", on_request_finished)
             page.on("requestfailed", on_request_failed)
 
-            # Observe LCP if supported by browser
+            # Observe LCP if supported by browser; neutralize WebSockets and Service Workers
             try:
                 page.add_init_script("""
+                    // Neutralize WebSockets in audit sandbox
+                    try {
+                        delete window.WebSocket;
+                        window.WebSocket = class {
+                            constructor() {
+                                throw new Error("WebSockets are disabled in the audit sandbox.");
+                            }
+                        };
+                    } catch (e) {}
+
+                    // Disable Service Workers in JavaScript context
+                    try {
+                        if ('serviceWorker' in navigator) {
+                            Object.defineProperty(navigator, 'serviceWorker', {
+                                get: () => undefined,
+                                configurable: false,
+                            });
+                        }
+                    } catch (e) {}
+
                     window.__lcp = null;
                     try {
                         const observer = new PerformanceObserver((entryList) => {
@@ -966,36 +1948,84 @@ class PlaywrightRenderer:
                 pass
 
             # Navigate: wait for networkidle or bounded timeout RENDER_TIMEOUT_MS
+            eff_nav_timeout_ms = RENDER_TIMEOUT_MS
+            if eff_deadline:
+                eff_nav_timeout_ms = int(eff_deadline.child_timeout(RENDER_TIMEOUT_MS / 1000.0) * 1000.0)
+                if eff_nav_timeout_ms < 100:
+                    result.render_error = f"Audit deadline exhausted before navigation to {url}"
+                    result.render_confidence = "low"
+                    result.render_state = RenderState.RENDER_FAILED
+                    result.network_requests = network_requests
+                    return result
+
             try:
-                page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="networkidle")
+                page.goto(url, timeout=eff_nav_timeout_ms, wait_until="networkidle")
             except Exception as nav_exc:
                 if ssrf_abort_events:
                     viol_url, viol_reason = ssrf_abort_events[0]
                     result.render_error = f"Blocked by SSRF protection on redirect/subrequest to {viol_url}: {viol_reason}"
                     result.render_confidence = "low"
+                    result.render_state = RenderState.BLOCKED
+                    result.network_requests = network_requests
+                    return result
+                if method_abort_events:
+                    viol_url, viol_method = method_abort_events[0]
+                    result.render_error = f"Blocked mutating HTTP method {viol_method} in browser request to {viol_url}"
+                    result.render_confidence = "low"
+                    result.render_state = RenderState.BLOCKED
+                    result.network_requests = network_requests
+                    return result
+                if redirect_abort_events:
+                    viol_url, viol_hops = redirect_abort_events[0]
+                    result.render_error = f"Blocked browser redirect loop ({viol_hops} hops) for {viol_url}"
+                    result.render_confidence = "low"
+                    result.render_state = RenderState.BLOCKED
                     result.network_requests = network_requests
                     return result
                 logger.debug("networkidle timeout/error for %s: %s; falling back to domcontentloaded", url, nav_exc)
                 try:
                     _ = page.content()
                 except Exception:
+                    eff_fallback_ms = RENDER_TIMEOUT_MS
+                    if eff_deadline:
+                        eff_fallback_ms = int(eff_deadline.child_timeout(RENDER_TIMEOUT_MS / 1000.0) * 1000.0)
+                        if eff_fallback_ms < 100:
+                            result.render_error = f"Audit deadline exhausted during navigation fallback for {url}"
+                            result.render_confidence = "low"
+                            result.render_state = RenderState.RENDER_FAILED
+                            result.network_requests = network_requests
+                            return result
                     try:
-                        page.goto(url, timeout=RENDER_TIMEOUT_MS, wait_until="domcontentloaded")
+                        page.goto(url, timeout=eff_fallback_ms, wait_until="domcontentloaded")
                     except Exception as fallback_exc:
                         if ssrf_abort_events:
                             viol_url, viol_reason = ssrf_abort_events[0]
                             result.render_error = f"Blocked by SSRF protection on redirect/subrequest to {viol_url}: {viol_reason}"
+                            result.render_state = RenderState.BLOCKED
+                        elif method_abort_events:
+                            viol_url, viol_method = method_abort_events[0]
+                            result.render_error = f"Blocked mutating HTTP method {viol_method} in browser request to {viol_url}"
+                            result.render_state = RenderState.BLOCKED
+                        elif redirect_abort_events:
+                            viol_url, viol_hops = redirect_abort_events[0]
+                            result.render_error = f"Blocked browser redirect loop ({viol_hops} hops) for {viol_url}"
+                            result.render_state = RenderState.BLOCKED
                         else:
                             result.render_error = f"Playwright navigation failed for {url}: {fallback_exc}"
+                            result.render_state = RenderState.RENDER_FAILED
                         result.render_confidence = "low"
                         result.network_requests = network_requests
                         return result
 
             if wait_ms > 0:
-                try:
-                    page.wait_for_timeout(wait_ms)
-                except Exception:
-                    pass
+                eff_wait_ms = wait_ms
+                if eff_deadline:
+                    eff_wait_ms = int(eff_deadline.child_timeout(wait_ms / 1000.0) * 1000.0)
+                if eff_wait_ms > 0:
+                    try:
+                        page.wait_for_timeout(eff_wait_ms)
+                    except Exception:
+                        pass
 
             # Final pass to capture any completed response timings
             for req, entry in req_entry_map.items():
@@ -1008,6 +2038,7 @@ class PlaywrightRenderer:
 
             result.rendered_html = page.content()
             result.is_rendered = True
+            result.render_state = RenderState.CONFIRMED
             result.rendered_soup = _safe_parse_html(result.rendered_html)
             result.network_requests = network_requests
 
@@ -1058,6 +2089,7 @@ class PlaywrightRenderer:
         except Exception as exc:
             result.render_error = f"Playwright render error for {url}: {exc}"
             result.render_confidence = "low"
+            result.render_state = RenderState.RENDER_FAILED
             result.network_requests = network_requests
             logger.warning(result.render_error)
         finally:

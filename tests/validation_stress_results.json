@@ -1,0 +1,98 @@
+{
+  "security_stress": {
+    "ssrf_filtering": "PASS",
+    "read_only_methods": "PASS",
+    "browser_scheme_egress": "PASS",
+    "renderer_service_workers_blocked": "PASS"
+  },
+  "resource_stress": {
+    "max_response_bytes_enforced": "PASS",
+    "captured_bytes": 5242880,
+    "large_jsonld_handled": "PASS",
+    "link_explosion_bounded": "PASS",
+    "frontier_size": 3,
+    "huge_sitemap_bounded": "PASS",
+    "sitemap_urls_parsed": 500,
+    "peak_memory_mb": 41.07,
+    "stress_duration_seconds": 2.9
+  },
+  "partial_failure": {
+    "http_error_schema_valid": "PASS",
+    "http_error_status": "completed",
+    "timeout_bounded": "PASS",
+    "timeout_schema_valid": "PASS",
+    "timeout_status": "blocked",
+    "subsystem_crash_graceful": "PASS"
+  },
+  "determinism": {
+    "repeatability_5_runs": "PASS",
+    "finding_count": 10,
+    "finding_ids": [
+      "F-001",
+      "F-002",
+      "F-003",
+      "F-004",
+      "F-005",
+      "F-006",
+      "F-007",
+      "F-008",
+      "F-009",
+      "F-010"
+    ],
+    "summary_counts": {
+      "total_findings": 10,
+      "critical": 0,
+      "high": 3,
+      "medium": 5,
+      "low": 0,
+      "info": 2,
+      "coverage": {
+        "pages_audited": 2,
+        "pages_in_sitemap": 10000,
+        "budget_limited": true
+      }
+    }
+  },
+  "runtime_budget": {
+    "minimal_site": {
+      "wall_clock_seconds": 0.405,
+      "audit_status": "completed",
+      "pages_audited": 1,
+      "total_findings": 9,
+      "schema_valid": true,
+      "within_5min_budget": true
+    },
+    "typical_site": {
+      "wall_clock_seconds": 0.435,
+      "audit_status": "completed",
+      "pages_audited": 1,
+      "total_findings": 12,
+      "schema_valid": true,
+      "within_5min_budget": true
+    },
+    "js_heavy_site": {
+      "wall_clock_seconds": 5.308,
+      "audit_status": "completed",
+      "pages_audited": 1,
+      "total_findings": 8,
+      "schema_valid": true,
+      "within_5min_budget": true
+    },
+    "adversarial_slow_site": {
+      "wall_clock_seconds": 8.024,
+      "audit_status": "blocked",
+      "pages_audited": 0,
+      "total_findings": 0,
+      "schema_valid": true,
+      "within_5min_budget": true
+    },
+    "multipage_crawl": {
+      "wall_clock_seconds": 4.436,
+      "audit_status": "completed",
+      "pages_audited": 1,
+      "total_findings": 13,
+      "schema_valid": true,
+      "within_5min_budget": true
+    }
+  }
+}

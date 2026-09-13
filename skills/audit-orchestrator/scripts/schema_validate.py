@@ -39,6 +39,8 @@ _DOMAIN_COVERAGE_KEYS = {
 _COVERAGE_KEYS = _DOMAIN_COVERAGE_KEYS | {
     "pages_with_low_render_confidence",
     "render_confidence",
+    "overall_state",
+    "limitations",
 }
 
 _TOP_LEVEL_ALLOWED = {
@@ -55,6 +57,7 @@ _TOP_LEVEL_ALLOWED = {
     "summary",
     "findings",
     "proactive_recommendations",
+    "remediation_themes",
     "coverage",
 }
 _SUMMARY_ALLOWED = {
@@ -83,6 +86,10 @@ _FINDING_ALLOWED = {
     "references",
     "duplicate_of",
     "confidence",
+    "source",
+    "location",
+    "why_it_matters",
+    "remediation_theme",
 }
 
 
@@ -197,7 +204,12 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     _check_type(report_data, "blocked_reason", str, errors, optional=True)
     _check_type(report_data, "audit_status_message", str, errors, optional=True)
     _check_type(report_data, "pages_audited", int, errors, optional=True)
-    _check_type(report_data, "audit_duration_seconds", (int, float), errors, optional=True)
+    if "audit_duration_seconds" in report_data and report_data["audit_duration_seconds"] is not None:
+        dur = report_data["audit_duration_seconds"]
+        if not isinstance(dur, (int, float)):
+            errors.append(f"audit_duration_seconds must be a number, got {type(dur).__name__}")
+        elif dur < 0:
+            errors.append(f"audit_duration_seconds must be non-negative (>= 0), got {dur}")
 
     # --- Summary ---
     summary = report_data.get("summary")
@@ -251,6 +263,33 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
                 elif len(item) < 10:
                     errors.append(f"proactive_recommendations[{i}] too short (min 10 chars)")
 
+    # --- Remediation themes ---
+    themes = report_data.get("remediation_themes")
+    if themes is not None:
+        if not isinstance(themes, list):
+            errors.append("remediation_themes must be an array/list")
+        else:
+            for i, th in enumerate(themes):
+                if not isinstance(th, dict):
+                    errors.append(f"remediation_themes[{i}] must be an object/dict")
+                else:
+                    for req_k in ("theme", "finding_ids", "primary_action", "priority"):
+                        if req_k not in th:
+                            errors.append(f"remediation_themes[{i}] missing required key '{req_k}'")
+                    if "theme" in th and not isinstance(th["theme"], str):
+                        errors.append(f"remediation_themes[{i}].theme must be a string")
+                    if "finding_ids" in th:
+                        if not isinstance(th["finding_ids"], list):
+                            errors.append(f"remediation_themes[{i}].finding_ids must be a list of strings")
+                        elif not all(isinstance(x, str) for x in th["finding_ids"]):
+                            errors.append(f"remediation_themes[{i}].finding_ids items must be strings")
+                    if "primary_action" in th and not isinstance(th["primary_action"], str):
+                        errors.append(f"remediation_themes[{i}].primary_action must be a string")
+                    if "target_asset" in th and not isinstance(th["target_asset"], str):
+                        errors.append(f"remediation_themes[{i}].target_asset must be a string")
+                    if "priority" in th and th["priority"] not in _VALID_SEVERITIES:
+                        errors.append(f"remediation_themes[{i}].priority must be a valid severity")
+
     # --- Coverage ---
     coverage = report_data.get("coverage")
     if coverage is not None:
@@ -267,7 +306,13 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
             if "render_confidence" in coverage and coverage["render_confidence"] not in {
                 "high", "medium", "low"
             }:
-                errors.append(f"coverage.render_confidence must be one of high, medium, low")
+                errors.append("coverage.render_confidence must be one of high, medium, low")
+            if "overall_state" in coverage and coverage["overall_state"] not in {
+                "COMPLETE", "PARTIAL", "LIMITED", "UNAVAILABLE"
+            }:
+                errors.append("coverage.overall_state must be one of COMPLETE, PARTIAL, LIMITED, UNAVAILABLE")
+            if "limitations" in coverage and not isinstance(coverage["limitations"], list):
+                errors.append("coverage.limitations must be an array/list of strings")
             extra_keys = set(coverage.keys()) - _COVERAGE_KEYS
             if extra_keys:
                 errors.append(f"coverage has unexpected keys: {extra_keys}")
@@ -377,6 +422,16 @@ def _validate_finding(
         elif conf < 0.0 or conf > 1.0:
             errors.append(f"{prefix}.confidence must be between 0.0 and 1.0, got {conf}")
 
+    # source (optional string: "static" or "rendered")
+    if "source" in finding:
+        src = finding["source"]
+        if src not in ("static", "rendered"):
+            errors.append(f"{prefix}.source must be 'static' or 'rendered', got '{src}'")
+
+    for str_key in ("location", "why_it_matters", "remediation_theme"):
+        if str_key in finding and not isinstance(finding[str_key], str):
+            errors.append(f"{prefix}.{str_key} must be a string")
+
 
 def _validate_skill_coverage(cov: Any, domain: str, errors: list[str]) -> None:
     """Validate a SkillCoverage object."""
@@ -398,7 +453,17 @@ def _validate_skill_coverage(cov: Any, domain: str, errors: list[str]) -> None:
         "notes",
         "render_confidence",
         "pages_with_low_render_confidence",
+        "network_requests",
+        "performance_metrics",
+        "rendered_word_count",
+        "static_word_count",
+        "csr_blanking_ratio",
+        "coverage_state",
     }
+    if "coverage_state" in cov and cov["coverage_state"] not in {
+        "COMPLETE", "PARTIAL", "LIMITED", "UNAVAILABLE"
+    }:
+        errors.append(f"{prefix}.coverage_state must be one of COMPLETE, PARTIAL, LIMITED, UNAVAILABLE")
     extra = set(cov.keys()) - allowed
     if extra:
         errors.append(f"{prefix} has unexpected keys: {extra}")

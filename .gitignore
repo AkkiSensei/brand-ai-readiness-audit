@@ -66,3 +66,6 @@ coverage.xml
 scratch/
 *_report.json
 *.report.json
+report_*.json
+release/
+Adobe-Brief.pdf

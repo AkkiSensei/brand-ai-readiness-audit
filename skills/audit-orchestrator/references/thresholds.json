@@ -22,6 +22,11 @@
     "max_depth": 3,
     "allowed_schemes": ["http", "https"],
     "sitemap_max_urls": 500,
+    "sitemap_max_doc_bytes": 1048576,
+    "sitemap_max_cumulative_bytes": 5242880,
+    "sitemap_max_docs": 25,
+    "max_links_per_page": 200,
+    "max_queue_size": 500,
     "disallow_extensions": [
       ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp",
       ".mp4", ".mp3", ".zip", ".gz", ".tar", ".woff", ".woff2",
@@ -36,7 +41,9 @@
     "playwright_wait_ms": 3000,
     "playwright_viewport_width": 1280,
     "playwright_viewport_height": 800,
-    "playwright_timeout_ms": 15000
+    "playwright_timeout_ms": 15000,
+    "max_browser_requests_per_page": 150,
+    "max_browser_redirects": 5
   },
 
   "robots": {
@@ -60,9 +67,11 @@
 
   "structured_data": {
     "min_jsonld_fields_organization": 4,
+    "min_jsonld_fields_organization_$comment": "Minimum recommended Organization properties (name, url, logo, description, sameAs, address, contactPoint). Missing required fields (name, url) triggers probable issue; missing optional properties (e.g. street address on digital-only SaaS brands) is treated as a weak signal.",
     "min_jsonld_fields_product": 3,
     "freshness_max_age_days": 180,
     "freshness_stale_age_days": 365,
+    "freshness_stale_age_days_$comment": "Stale content threshold (365 days). Applied strictly to editorial, article, and time-sensitive content. Evergreen policy and utility pages (e.g. /privacy, /terms, /contact) without article schemas are exempted from stale penalties to prevent false-positive degradation.",
     "image_text_ratio_threshold": 0.40,
     "pdf_text_density_threshold": 50
   },
@@ -72,7 +81,9 @@
     "sameas_min_external_links": 1,
     "max_claim_verification_urls": 3,
     "brand_name_max_variations": 2,
+    "brand_name_max_variations_$comment": "Permits up to 2 distinct canonical brand roots across crawled pages. Legal suffixes (Inc, LLC, Ltd, Corp, GmbH, etc.) and punctuation are normalized prior to comparison to eliminate false-positive contradictions on legitimate corporate designations.",
     "address_similarity_threshold": 0.85,
+    "address_similarity_threshold_$comment": "Pairwise address similarity threshold (0.85). Normalizes common postal abbreviations (St/Street, Ste/Suite, Ave/Avenue) to prevent false mismatches. Multi-location footprints with distinct localities/postcodes are treated as separate locations rather than conflicting addresses.",
     "phone_normalization_pattern": "^\\+?[0-9\\s\\-\\(\\)]{7,20}$"
   },
 

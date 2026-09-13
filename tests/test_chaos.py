@@ -198,7 +198,6 @@ def run_chaos_suite() -> int:
 
     passed_cases = 0
     total_cases = 4
-
     try:
         # -------------------------------------------------------------
         # [1/4] Zero-byte page
@@ -209,7 +208,7 @@ def run_chaos_suite() -> int:
         zb_exc = "NONE"
         zb_valid = False
         try:
-            report_zb = run_audit(zb_url, max_pages=2)
+            report_zb = run_audit(zb_url, max_pages=2, allow_private_ips=True)
             zb_valid, zb_errs = _verify_report_integrity(report_zb)
         except Exception as exc:
             zb_exc = f"{type(exc).__name__}: {exc}"
@@ -235,7 +234,7 @@ def run_chaos_suite() -> int:
         gb_exc = "NONE"
         gb_valid = False
         try:
-            report_gb = run_audit(gb_url, max_pages=2)
+            report_gb = run_audit(gb_url, max_pages=2, allow_private_ips=True)
             gb_valid, gb_errs = _verify_report_integrity(report_gb)
         except Exception as exc:
             gb_exc = f"{type(exc).__name__}: {exc}"
@@ -261,7 +260,7 @@ def run_chaos_suite() -> int:
         rd_valid = False
         rd_protect = False
         try:
-            report_rd = run_audit(rd_url, max_pages=2)
+            report_rd = run_audit(rd_url, max_pages=2, allow_private_ips=True)
             rd_valid, rd_errs = _verify_report_integrity(report_rd)
             # Check that redirect protection engaged (CR-002 flagged or crawl error logged)
             rules = [f.get("local_id") for f in report_rd.get("findings", [])]
@@ -294,7 +293,7 @@ def run_chaos_suite() -> int:
         bh_blocked = False
         report_bh = {}
         try:
-            report_bh = run_audit(bh_url, max_pages=2, timeout_s=10)
+            report_bh = run_audit(bh_url, max_pages=2, timeout_s=10, allow_private_ips=True)
             bh_valid, bh_errs = _verify_report_integrity(report_bh)
             bh_blocked = (
                 report_bh.get("audit_status") == "blocked"

@@ -132,6 +132,37 @@
         "minLength": 10
       }
     },
+    "remediation_themes": {
+      "type": "array",
+      "description": "Lightweight grouping of audit findings that share common remediation actions, assets, or infrastructure locations.",
+      "items": {
+        "type": "object",
+        "required": ["theme", "finding_ids", "primary_action", "priority"],
+        "additionalProperties": false,
+        "properties": {
+          "theme": {
+            "type": "string",
+            "description": "Name of the remediation theme."
+          },
+          "finding_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of finding IDs (F-001..F-NNN) addressed by this theme."
+          },
+          "primary_action": {
+            "type": "string",
+            "description": "Concrete, mechanism-correct primary action addressing the grouped findings."
+          },
+          "target_asset": {
+            "type": "string",
+            "description": "The primary asset or file to modify (e.g. robots.txt, homepage <head> JSON-LD, edge CDN WAF)."
+          },
+          "priority": {
+            "$ref": "#/definitions/Severity"
+          }
+        }
+      }
+    },
     "coverage": {
       "type": "object",
       "description": "Per-domain-skill coverage metadata.",
@@ -150,6 +181,16 @@
           "type": "string",
           "enum": ["high", "medium", "low"],
           "description": "Overall render confidence level for the audited site."
+        },
+        "overall_state": {
+          "type": "string",
+          "enum": ["COMPLETE", "PARTIAL", "LIMITED", "UNAVAILABLE"],
+          "description": "Overall coverage state across all audit domains."
+        },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Explicit limitations where conclusions are constrained due to unobservable, partial, or blocked evidence."
         }
       }
     },
@@ -328,6 +369,18 @@
           "type": "string",
           "enum": ["static", "rendered"],
           "description": "Indicates whether the finding was derived from static HTML or post-JS rendered DOM."
+        },
+        "location": {
+          "type": "string",
+          "description": "Exact asset or URL location where the finding was observed or requires remediation."
+        },
+        "why_it_matters": {
+          "type": "string",
+          "description": "Technical impact explanation describing why this finding impedes AI discovery or extraction."
+        },
+        "remediation_theme": {
+          "type": "string",
+          "description": "The lightweight remediation theme grouping this finding with related fixes."
         }
       }
     },
@@ -379,6 +432,11 @@
         "csr_blanking_ratio": {
           "type": "number",
           "minimum": 0.0
+        },
+        "coverage_state": {
+          "type": "string",
+          "enum": ["COMPLETE", "PARTIAL", "LIMITED", "UNAVAILABLE"],
+          "description": "Compact deterministic observation and coverage state for this domain."
         }
       }
     }
