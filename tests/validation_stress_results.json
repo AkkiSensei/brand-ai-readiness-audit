@@ -14,7 +14,7 @@
     "huge_sitemap_bounded": "PASS",
     "sitemap_urls_parsed": 500,
     "peak_memory_mb": 41.07,
-    "stress_duration_seconds": 1.95
+    "stress_duration_seconds": 1.62
   },
   "partial_failure": {
     "http_error_schema_valid": "PASS",
@@ -57,7 +57,7 @@
   },
   "runtime_budget": {
     "minimal_site": {
-      "wall_clock_seconds": 0.625,
+      "wall_clock_seconds": 0.345,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 12,
@@ -65,7 +65,7 @@
       "within_5min_budget": true
     },
     "typical_site": {
-      "wall_clock_seconds": 0.703,
+      "wall_clock_seconds": 0.282,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 14,
@@ -81,7 +81,7 @@
       "within_5min_budget": true
     },
     "adversarial_slow_site": {
-      "wall_clock_seconds": 8.001,
+      "wall_clock_seconds": 8.008,
       "audit_status": "blocked",
       "pages_audited": 0,
       "total_findings": 0,
@@ -89,7 +89,7 @@
       "within_5min_budget": true
     },
     "multipage_crawl": {
-      "wall_clock_seconds": 4.856,
+      "wall_clock_seconds": 4.356,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 14,

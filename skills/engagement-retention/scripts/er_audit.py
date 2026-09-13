@@ -553,7 +553,10 @@ def _check_er004(
 
             # HEAD check for uncrawled links
             try:
-                head = http_client.head(link)
+                if isinstance(eff_deadline, AuditDeadline):
+                    head = http_client.head(link, deadline=eff_deadline)
+                else:
+                    head = http_client.head(link)
                 if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
                     break
                 tested_count += 1

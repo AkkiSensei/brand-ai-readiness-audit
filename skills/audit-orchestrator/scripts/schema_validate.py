@@ -198,7 +198,12 @@ def _validate_fallback(report_data: dict) -> tuple[bool, list[str]]:
     _check_type(report_data, "blocked_reason", str, errors, optional=True)
     _check_type(report_data, "audit_status_message", str, errors, optional=True)
     _check_type(report_data, "pages_audited", int, errors, optional=True)
-    _check_type(report_data, "audit_duration_seconds", (int, float), errors, optional=True)
+    if "audit_duration_seconds" in report_data and report_data["audit_duration_seconds"] is not None:
+        dur = report_data["audit_duration_seconds"]
+        if not isinstance(dur, (int, float)):
+            errors.append(f"audit_duration_seconds must be a number, got {type(dur).__name__}")
+        elif dur < 0:
+            errors.append(f"audit_duration_seconds must be non-negative (>= 0), got {dur}")
 
     # --- Summary ---
     summary = report_data.get("summary")

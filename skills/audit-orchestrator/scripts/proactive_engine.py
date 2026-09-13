@@ -138,18 +138,23 @@ def _pa001(
     target_url: str,
     http_client: HttpClient,
     existing_ids: set[str],
+    deadline: Optional[Any] = None,
 ) -> Optional[dict]:
     """Check for /llms.txt or /llms-full.txt availability."""
     try:
+        if deadline and hasattr(deadline, "expired") and deadline.expired():
+            return None
         parsed = urllib.parse.urlparse(target_url)
         origin = f"{parsed.scheme}://{parsed.hostname}"
         if parsed.port:
             origin += f":{parsed.port}"
 
         for path in ("/llms.txt", "/llms-full.txt"):
+            if deadline and hasattr(deadline, "expired") and deadline.expired():
+                return None
             url = origin + path
             try:
-                result = http_client.head(url)
+                result = http_client.head(url, deadline=deadline)
                 if result.status_code and 200 <= result.status_code < 400:
                     return None  # File exists, no recommendation needed
             except Exception:
@@ -517,6 +522,7 @@ def inject_proactive_recommendations(
     page_results: dict[str, PageResult],
     http_client: HttpClient,
     target_url: str,
+    deadline: Optional[Any] = None,
 ) -> list[dict]:
     """Generate PA-001..PA-006 and canonical proactive recommendations.
 
@@ -529,7 +535,7 @@ def inject_proactive_recommendations(
     results: list[dict] = []
 
     rules = [
-        ("PA-001", lambda: _pa001(target_url, http_client, existing_ids)),
+        ("PA-001", lambda: _pa001(target_url, http_client, existing_ids, deadline=deadline)),
         ("PA-002", lambda: _pa002(page_results, existing_ids)),
         ("PA-003", lambda: _pa003(page_results, existing_ids)),
         ("PA-004", lambda: _pa004(page_results, existing_ids)),

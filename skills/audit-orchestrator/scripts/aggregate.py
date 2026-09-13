@@ -455,7 +455,7 @@ def _build_aborted_report(
         "audit_status": status,
         "audit_status_message": message,
         "pages_audited": 0,
-        "audit_duration_seconds": round(elapsed, 2),
+        "audit_duration_seconds": max(0.0, round(elapsed, 2)),
         "summary": {
             "total_findings": len(norm_findings),
             "critical": sev_counts["critical"],
@@ -511,6 +511,25 @@ def _build_aborted_report(
     if reason:
         report["blocked_reason"] = reason
 
+    # Ensure schema validity on aborted reports
+    valid, validation_errors = validate_report(report)
+    if not valid:
+        logger.warning("Aborted report schema validation failed: %s", validation_errors)
+        dur = report.get("audit_duration_seconds")
+        if not isinstance(dur, (int, float)) or dur < 0:
+            report["audit_duration_seconds"] = 0.0
+        for f in report.get("findings", []):
+            if "evidence" not in f or not f["evidence"]:
+                f["evidence"] = f"Audited on {target_url}"
+            if "suggested_action" not in f or not isinstance(f["suggested_action"], dict):
+                f["suggested_action"] = {
+                    "summary": "Review and address this finding.",
+                    "priority": f.get("severity", "info"),
+                }
+            if "related_to" not in f or not isinstance(f["related_to"], list):
+                f["related_to"] = []
+        validate_report(report)
+
     return report
 
 
@@ -535,6 +554,9 @@ def run_audit(
     deadline: Optional[AuditDeadline] = kwargs.get("deadline")
     if deadline is None:
         deadline = AuditDeadline.from_budget(timeout_s, started_at=t_start)
+    else:
+        # Honor deadline's start time, but never allow future start times
+        t_start = min(deadline.started_at, t_start)
 
     if "render_js" in kwargs:
         render_js = bool(kwargs["render_js"])
@@ -552,7 +574,7 @@ def run_audit(
     if not is_local_target:
         disallowed, reason = is_ssrf_disallowed(target_host)
         if disallowed:
-            elapsed = time.monotonic() - t_start
+            elapsed = max(0.0, time.monotonic() - t_start)
             return _build_aborted_report(
                 target_url,
                 "blocked",
@@ -571,6 +593,8 @@ def run_audit(
                 robots_cache=client.robots,
                 allow_private_ips=client._allow_private_ips,
                 deadline=deadline,
+                session=client._session,
+                pin_manager=client._pin_manager,
             )
             own_renderer = True
         except Exception as exc:
@@ -707,7 +731,7 @@ def _run_pipeline(
     # ==============================================================
     pages_analyzed = crawl_result.get("pages_analyzed", 0)
     if pages_analyzed == 0:
-        elapsed = time.monotonic() - t_start
+        elapsed = max(0.0, time.monotonic() - t_start)
 
         # 1. Total connection failure / host refused / DNS failure / timeout
         if not page_results or all(pr.status_code is None for pr in page_results.values()):
@@ -777,13 +801,13 @@ def _run_pipeline(
             continue
 
         # Check timeout budget
-        elapsed = time.monotonic() - t_start
+        elapsed = max(0.0, time.monotonic() - t_start)
         if (deadline and deadline.expired()) or elapsed >= timeout_s:
             domain_results[domain_name] = {
                 "domain": domain_name,
                 "pages_analyzed": 0,
                 "pages_discovered": 0,
-                "errors": [f"Skipped: timeout budget exhausted ({elapsed:.0f}s >= {timeout_s}s)."],
+                "errors": ["Skipped: timeout budget exhausted."],
                 "findings": [],
                 "proactive_candidates": [],
             }
@@ -849,7 +873,7 @@ def _run_pipeline(
     # STEP 10: Proactive recommendations (PA-001..PA-006)
     # ==============================================================
     proactive_findings = inject_proactive_recommendations(
-        interim_report, page_results, client, target_url,
+        interim_report, page_results, client, target_url, deadline=deadline,
     )
 
     # Normalise proactive findings
@@ -913,7 +937,7 @@ def _run_pipeline(
     # ==============================================================
     # STEP 15: Assemble report
     # ==============================================================
-    elapsed = time.monotonic() - t_start
+    elapsed = max(0.0, time.monotonic() - t_start)
 
     timeout_skipped = any(
         res and any("timeout budget" in str(e).lower() for e in res.get("errors", []))
@@ -949,7 +973,7 @@ def _run_pipeline(
             (domain_results.get("crawl-render-access") or {}).get("pages_analyzed")
             or len(frontier)
         ),
-        "audit_duration_seconds": round(elapsed, 2),
+        "audit_duration_seconds": max(0.0, round(elapsed, 2)),
         "summary": summary,
         "findings": sorted_findings,
         "proactive_recommendations": proactive_strings,
@@ -972,12 +996,16 @@ def _run_pipeline(
         report["csr_blanking_ratio"] = crawl_res["csr_blanking_ratio"]
 
     # ==============================================================
-    # STEP 16: Schema validation
+    # STEP 16: Schema validation & Repair
     # ==============================================================
     valid, validation_errors = validate_report(report)
     if not valid:
         logger.warning("Report schema validation failed: %s", validation_errors)
-        # Attempt repair: ensure all findings have required fields
+        # Attempt repair: guarantee non-negative duration
+        dur = report.get("audit_duration_seconds")
+        if not isinstance(dur, (int, float)) or dur < 0:
+            report["audit_duration_seconds"] = max(0.0, round(time.monotonic() - t_start, 2))
+        # Ensure all findings have required fields
         for f in report["findings"]:
             if "evidence" not in f or not f["evidence"]:
                 f["evidence"] = f"Audited on {target_url}"

@@ -43,6 +43,7 @@ from http_client import (
     HttpClient,
     PageResult,
     PlaywrightRenderer,
+    RateLimiter,
     RobotsState,
     RobotsTxtCache,
 )
@@ -50,6 +51,7 @@ import crawl_audit
 import aggregate
 import tec_audit
 import er_audit
+import schema_validate
 
 
 # ===========================================================================
@@ -178,6 +180,12 @@ class _SlowHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/slow-page")
             self.end_headers()
+        elif self.path == "/slow-sitemap.xml":
+            time.sleep(0.8)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/xml")
+            self.end_headers()
+            self.wfile.write(b'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>/slow-page</loc></url></urlset>')
         else:
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
@@ -362,3 +370,147 @@ def test_tec_and_er_broken_link_checks_respect_deadline():
         deadline=deadline,
     )
     assert res_er["domain"] == "engagement-retention"
+
+
+# ===========================================================================
+# 6. Additional Adversarial Timing Tests (Phase 2D)
+# ===========================================================================
+
+def test_slow_sitemap_bounded_by_deadline(slow_server):
+    """Verify slow sitemap fetching does not exceed remaining audit deadline."""
+    deadline = AuditDeadline(timeout_s=0.3)
+    client = HttpClient(allow_private_ips=True, deadline=deadline)
+
+    t_start = time.monotonic()
+    visited: set[str] = set()
+    urls, raw = crawl_audit._fetch_sitemap_urls(
+        f"{slow_server}/slow-sitemap.xml",
+        client,
+        visited=visited,
+        deadline=deadline,
+    )
+    elapsed = time.monotonic() - t_start
+
+    assert elapsed < 0.6  # Terminated before the 0.8s server delay finished
+    assert urls == []
+
+
+def test_rate_limiter_sleep_clamped_to_deadline():
+    """Verify RateLimiter clamps its wait time to deadline.remaining()."""
+    limiter = RateLimiter(interval=2.0)
+    # Pace host initially
+    limiter.wait("example.com")
+
+    # Second wait would normally sleep ~2.0s, but deadline only allows 0.05s
+    deadline = AuditDeadline(timeout_s=0.05)
+    t0 = time.monotonic()
+    limiter.wait("example.com", deadline=deadline)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 0.2  # Clamped to remaining budget (~0.05s), NOT 2.0s
+    assert deadline.expired()
+
+
+def test_synthetic_future_t_start_and_duration_guarantee():
+    """Verify synthetic future timestamps are clamped and never produce negative durations."""
+    now = time.monotonic()
+    future_time = now + 1000.0
+
+    # 1. AuditDeadline clamps future started_at to current monotonic time
+    deadline = AuditDeadline(timeout_s=10.0, started_at=future_time)
+    assert deadline.started_at <= time.monotonic()
+    assert deadline.elapsed() >= 0.0
+    assert deadline.remaining() <= 10.0
+
+    # 2. AuditDeadline.from_budget with future timestamp
+    dl2 = AuditDeadline.from_budget(10.0, started_at=future_time)
+    assert dl2.started_at <= time.monotonic()
+    assert dl2.elapsed() >= 0.0
+
+    # 3. aggregate.run_audit produces audit_duration_seconds >= 0 even with future t_start
+    report = aggregate.run_audit(
+        "http://127.0.0.1:1",
+        timeout_s=2,
+        t_start=future_time,
+        deadline=AuditDeadline(timeout_s=2.0, started_at=future_time),
+        allow_private_ips=True,
+    )
+    dur = report.get("audit_duration_seconds")
+    assert dur is not None
+    assert dur >= 0.0
+
+
+def test_zero_and_micro_budget_deadline():
+    """Verify zero and micro-budgets abort immediately with non-negative duration."""
+    # Zero budget
+    zero_dl = AuditDeadline(timeout_s=0.0)
+    assert zero_dl.expired()
+    assert zero_dl.remaining() == 0.0
+    assert zero_dl.child_timeout(5.0) == 0.0
+
+    client = HttpClient(allow_private_ips=True, deadline=zero_dl)
+    pr = client.get("http://127.0.0.1:1/test", deadline=zero_dl)
+    assert pr.status_code is None
+    assert "deadline expired" in pr.error.lower()
+    assert pr.fetch_duration_seconds >= 0.0
+
+    # Micro budget
+    micro_dl = AuditDeadline(timeout_s=0.00001)
+    report = aggregate.run_audit(
+        "http://127.0.0.1:1",
+        timeout_s=0.00001,
+        deadline=micro_dl,
+        allow_private_ips=True,
+    )
+    assert report.get("audit_duration_seconds") >= 0.0
+    assert report.get("audit_status") in ("blocked", "partial", "completed")
+
+
+def test_schema_repair_and_validation_for_invalid_durations():
+    """Verify schema validator rejects negative durations and orchestrator repairs them."""
+    # 1. Fallback validator rejects negative duration
+    valid, errors = schema_validate._validate_fallback({
+        "schema_version": "1.0.0",
+        "generated_at": "2026-09-13T12:00:00Z",
+        "audited_at": "2026-09-13T12:00:00Z",
+        "target_url": "https://example.com",
+        "site": "https://example.com",
+        "audit_duration_seconds": -5.5,
+        "summary": {
+            "total_findings": 0,
+            "critical": 0,
+            "high": 0,
+            "medium": 0,
+            "low": 0,
+            "info": 0,
+        },
+        "findings": [],
+    })
+    assert not valid
+    assert any("non-negative" in e for e in errors)
+
+    # 2. _build_aborted_report guarantees duration >= 0
+    aborted = aggregate._build_aborted_report(
+        "https://example.com",
+        status="blocked",
+        message="Aborted for testing",
+        elapsed=-10.0,
+    )
+    assert aborted["audit_duration_seconds"] == 0.0
+
+
+def test_almost_expired_deadline_behavior():
+    """Verify almost-expired deadline clamps child operations and fails closed."""
+    # 0.0001s remaining
+    deadline = AuditDeadline(timeout_s=0.0001)
+    assert deadline.child_timeout(10.0) <= 0.001
+    c_to, r_to = deadline.child_timeout_tuple(5.0, 5.0)
+    assert c_to <= 0.001
+    assert r_to <= 0.001
+
+    client = HttpClient(allow_private_ips=True, deadline=deadline)
+    # HEAD check
+    head_res = client.head("http://127.0.0.1:1/fast", deadline=deadline)
+    assert head_res.fetch_duration_seconds >= 0.0
+    assert head_res.error is not None
+

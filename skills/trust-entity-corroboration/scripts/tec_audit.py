@@ -691,7 +691,10 @@ def _check_tc003(
                 if time.monotonic() - t_start >= timeout_s:
                     break
             try:
-                head = http_client.head(target_url)
+                if isinstance(eff_deadline, AuditDeadline):
+                    head = http_client.head(target_url, deadline=eff_deadline)
+                else:
+                    head = http_client.head(target_url)
                 if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
                     break
                 is_walled_garden = any(

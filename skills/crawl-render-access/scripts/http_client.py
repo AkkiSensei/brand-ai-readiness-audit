@@ -641,8 +641,10 @@ class RateLimiter:
         self._last_request: dict[str, float] = {}
         self._lock = threading.Lock()
 
-    def wait(self, host: str) -> None:
-        """Block the calling thread until the rate limit window has elapsed."""
+    def wait(self, host: str, deadline: Optional["AuditDeadline"] = None) -> None:
+        """Block the calling thread until the rate limit window has elapsed, bounded by deadline."""
+        if deadline and deadline.expired():
+            return
         clean_host = (host or "").split(":")[0].lower()
         if not clean_host or clean_host in ("127.0.0.1", "localhost", "::1"):
             return
@@ -657,7 +659,10 @@ class RateLimiter:
             else:
                 self._last_request[host] = now
         if sleep_time > 0:
-            time.sleep(sleep_time)
+            if deadline:
+                sleep_time = min(sleep_time, deadline.remaining())
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
 
 # ---------------------------------------------------------------------------
@@ -672,14 +677,26 @@ class AuditDeadline:
         timeout_s: float | None = None,
         started_at: float | None = None,
     ) -> None:
-        self.started_at: float = started_at if started_at is not None else time.monotonic()
+        now = time.monotonic()
+        # If started_at is synthetic or in the future, clamp to now to prevent clock skew / negative durations
+        if started_at is not None:
+            self.started_at: float = min(float(started_at), now)
+        else:
+            self.started_at = now
+
         self.timeout_s: float = float(timeout_s) if timeout_s is not None else float("inf")
         self.deadline: float = self.started_at + self.timeout_s
 
+    def elapsed(self) -> float:
+        """Wall-clock elapsed time since start (strictly non-negative)."""
+        return max(0.0, time.monotonic() - self.started_at)
+
     def remaining(self) -> float:
-        """Seconds remaining before deadline expiration (never negative)."""
+        """Seconds remaining before deadline expiration (never negative, bounded by timeout_s if positive)."""
         rem = self.deadline - time.monotonic()
-        return max(0.0, rem)
+        if self.timeout_s > 0:
+            return max(0.0, min(self.timeout_s, rem))
+        return 0.0 if rem <= 0 else max(0.0, rem)
 
     def expired(self) -> bool:
         """True if the deadline has elapsed."""
@@ -782,7 +799,7 @@ def _safe_fetch_with_redirects(
             redirect_chain=redirect_chain,
             error=f"Blocked non-read-only method '{method_upper}' (only GET and HEAD permitted)",
             is_connection_error=True,
-            duration_seconds=time.monotonic() - t0,
+            duration_seconds=max(0.0, time.monotonic() - t0),
         )
 
     if deadline and deadline.expired():
@@ -791,7 +808,7 @@ def _safe_fetch_with_redirects(
             redirect_chain=redirect_chain,
             error=f"Audit deadline expired before request could start for {url}",
             is_timeout=True,
-            duration_seconds=time.monotonic() - t0,
+            duration_seconds=max(0.0, time.monotonic() - t0),
         )
 
     for hop in range(max_redirects + 1):
@@ -801,7 +818,7 @@ def _safe_fetch_with_redirects(
                 redirect_chain=redirect_chain,
                 error=f"Audit deadline expired fetching {current_url}",
                 is_timeout=True,
-                duration_seconds=time.monotonic() - t0,
+                duration_seconds=max(0.0, time.monotonic() - t0),
             )
 
         parsed = urllib.parse.urlparse(current_url)
@@ -811,7 +828,7 @@ def _safe_fetch_with_redirects(
                 redirect_chain=redirect_chain,
                 error=f"Blocked unsupported URL scheme '{parsed.scheme}' (only HTTP and HTTPS permitted)",
                 is_ssrf_blocked=True,
-                duration_seconds=time.monotonic() - t0,
+                duration_seconds=max(0.0, time.monotonic() - t0),
             )
         hostname = parsed.hostname or ""
 
@@ -824,14 +841,14 @@ def _safe_fetch_with_redirects(
                     redirect_chain=redirect_chain,
                     error=f"Blocked by SSRF protection: {reason}",
                     is_ssrf_blocked=True,
-                    duration_seconds=time.monotonic() - t0,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
                 )
             if pin_manager and cur_ips:
                 pin_manager.pin(hostname, cur_ips[0])
 
         if limiter:
             try:
-                limiter.wait(hostname or current_url)
+                limiter.wait(hostname or current_url, deadline=deadline)
             except Exception as exc:
                 logger.debug("Rate limiter error for %s: %s", current_url, exc)
 
@@ -844,7 +861,7 @@ def _safe_fetch_with_redirects(
                     redirect_chain=redirect_chain,
                     error=f"Audit deadline exhausted fetching {current_url}",
                     is_timeout=True,
-                    duration_seconds=time.monotonic() - t0,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
                 )
             hop_timeout = (hop_conn, hop_req)
         else:
@@ -866,7 +883,7 @@ def _safe_fetch_with_redirects(
                 redirect_chain=redirect_chain,
                 error=f"Request timed out for {current_url}: {exc}",
                 is_timeout=True,
-                duration_seconds=time.monotonic() - t0,
+                duration_seconds=max(0.0, time.monotonic() - t0),
             )
         except requests.exceptions.ConnectionError as exc:
             exc_str = str(exc)
@@ -877,14 +894,14 @@ def _safe_fetch_with_redirects(
                     redirect_chain=redirect_chain,
                     error=f"Blocked by SSRF protection: {clean_msg}",
                     is_ssrf_blocked=True,
-                    duration_seconds=time.monotonic() - t0,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
                 )
             return SafeFetchResult(
                 final_url=current_url,
                 redirect_chain=redirect_chain,
                 error=f"Connection error for {current_url}: {exc}",
                 is_connection_error=True,
-                duration_seconds=time.monotonic() - t0,
+                duration_seconds=max(0.0, time.monotonic() - t0),
             )
         except requests.exceptions.RequestException as exc:
             return SafeFetchResult(
@@ -892,7 +909,7 @@ def _safe_fetch_with_redirects(
                 redirect_chain=redirect_chain,
                 error=f"Request error for {current_url}: {exc}",
                 is_connection_error=True,
-                duration_seconds=time.monotonic() - t0,
+                duration_seconds=max(0.0, time.monotonic() - t0),
             )
         except Exception as exc:
             return SafeFetchResult(
@@ -900,7 +917,7 @@ def _safe_fetch_with_redirects(
                 redirect_chain=redirect_chain,
                 error=f"Unexpected error for {current_url}: {exc}",
                 is_connection_error=True,
-                duration_seconds=time.monotonic() - t0,
+                duration_seconds=max(0.0, time.monotonic() - t0),
             )
 
         location_header = resp.headers.get("Location") or resp.headers.get("location")
@@ -913,7 +930,7 @@ def _safe_fetch_with_redirects(
                     redirect_chain=redirect_chain,
                     error=f"Too many redirects ({len(redirect_chain)} hops) fetching {url}",
                     is_too_many_redirects=True,
-                    duration_seconds=time.monotonic() - t0,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
                 )
 
             next_url = urllib.parse.urljoin(current_url, location_header)
@@ -925,7 +942,7 @@ def _safe_fetch_with_redirects(
                     redirect_chain=redirect_chain,
                     error=f"Blocked redirect to unsupported scheme '{next_parsed.scheme}'",
                     is_ssrf_blocked=True,
-                    duration_seconds=time.monotonic() - t0,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
                 )
             next_hostname = next_parsed.hostname or ""
 
@@ -942,7 +959,7 @@ def _safe_fetch_with_redirects(
                     redirect_chain=redirect_chain,
                     error=f"Blocked by SSRF protection on redirect to {next_url}: {reason}",
                     is_ssrf_blocked=True,
-                    duration_seconds=time.monotonic() - t0,
+                    duration_seconds=max(0.0, time.monotonic() - t0),
                 )
             if pin_manager and next_ips:
                 pin_manager.pin(next_hostname, next_ips[0])
@@ -958,7 +975,7 @@ def _safe_fetch_with_redirects(
             redirect_chain=redirect_chain,
             error=f"No response received for {url}",
             is_connection_error=True,
-            duration_seconds=time.monotonic() - t0,
+            duration_seconds=max(0.0, time.monotonic() - t0),
         )
 
     if resp.is_redirect:
@@ -968,14 +985,14 @@ def _safe_fetch_with_redirects(
             redirect_chain=redirect_chain,
             error=f"Too many redirects ({len(redirect_chain)} hops) fetching {url}",
             is_too_many_redirects=True,
-            duration_seconds=time.monotonic() - t0,
+            duration_seconds=max(0.0, time.monotonic() - t0),
         )
 
     return SafeFetchResult(
         response=resp,
         final_url=current_url,
         redirect_chain=redirect_chain,
-        duration_seconds=time.monotonic() - t0,
+        duration_seconds=max(0.0, time.monotonic() - t0),
     )
 
 
@@ -1321,7 +1338,7 @@ class HttpClient:
             deadline=eff_deadline,
         )
 
-        result.fetch_duration_seconds = fetch_res.duration_seconds
+        result.fetch_duration_seconds = max(0.0, fetch_res.duration_seconds)
         result.url = fetch_res.final_url or url
         result.redirect_chain = fetch_res.redirect_chain
 
@@ -1346,6 +1363,9 @@ class HttpClient:
             chunks: list[bytes] = []
             total = 0
             for chunk in resp.iter_content(chunk_size=65536):
+                if eff_deadline and eff_deadline.expired():
+                    result.error = f"Audit deadline expired while reading response body from {url}"
+                    break
                 total += len(chunk)
                 if total > MAX_RESPONSE_BYTES:
                     excess = total - MAX_RESPONSE_BYTES
@@ -1427,7 +1447,7 @@ class HttpClient:
             deadline=eff_deadline,
         )
 
-        result.fetch_duration_seconds = fetch_res.duration_seconds
+        result.fetch_duration_seconds = max(0.0, fetch_res.duration_seconds)
         result.url = fetch_res.final_url or url
         result.redirect_chain = fetch_res.redirect_chain
 
@@ -1486,9 +1506,13 @@ class PlaywrightRenderer:
         rate_limiter: Optional[RateLimiter] = None,
         robots_cache: Optional[RobotsTxtCache] = None,
         allow_private_ips: bool = False,
+        block_private_subrequests: bool = False,
         deadline: Optional[AuditDeadline] = None,
+        session: Optional[requests.Session] = None,
+        pin_manager: Optional[DestinationPinningManager] = None,
     ) -> None:
         self._allow_private_ips = bool(allow_private_ips)
+        self._block_private_subrequests = bool(block_private_subrequests)
         self._limiter = rate_limiter
         self._robots = robots_cache
         self.deadline = deadline
@@ -1496,6 +1520,32 @@ class PlaywrightRenderer:
         self._browser = None
         self._available = self._check_availability()
         self._launch_count = 0
+        self._pin_manager = (
+            pin_manager
+            or (robots_cache._pin_manager if robots_cache else None)
+            or DestinationPinningManager()
+        )
+        self._session = session or self._build_session()
+        self._own_session = session is None
+
+    def _build_session(self) -> requests.Session:
+        session = requests.Session()
+        session.headers.update({"User-Agent": USER_AGENT, **DEFAULT_HEADERS})
+        retry_strategy = Retry(
+            total=0,
+            connect=False,
+            read=False,
+            status=0,
+            raise_on_status=False,
+        )
+        adapter = SSRFSafeHTTPAdapter(
+            pin_manager=self._pin_manager,
+            allow_private_ips=self._allow_private_ips,
+            max_retries=retry_strategy,
+        )
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
 
     def set_deadline(self, deadline: Optional[AuditDeadline]) -> None:
         """Update or establish the shared authoritative deadline."""
@@ -1516,6 +1566,11 @@ class PlaywrightRenderer:
         """Lazily launch the Playwright browser once across the crawler lifecycle."""
         if self._browser is not None:
             return
+        import asyncio
+        try:
+            asyncio.set_event_loop(None)
+        except Exception:
+            pass
         from playwright.sync_api import sync_playwright  # type: ignore[import]
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(
@@ -1604,8 +1659,8 @@ class PlaywrightRenderer:
         # --- Shared Rate Limiter Check ---
         if self._limiter is not None:
             t0_pace = time.monotonic()
-            self._limiter.wait(target_host or url)
-            paced_time = time.monotonic() - t0_pace
+            self._limiter.wait(target_host or url, deadline=eff_deadline)
+            paced_time = max(0.0, time.monotonic() - t0_pace)
             if paced_time > 0.05:
                 logger.info("Renderer rate limiter paced host %s (slept %.3fs)", target_host, paced_time)
 
@@ -1684,7 +1739,7 @@ class PlaywrightRenderer:
                     route.abort("failed")
                     return
 
-                # 5. SSRF Destination Validation & Scheme Filtering
+                # 5. Scheme Filtering: In-memory schemes continue; non-HTTP schemes abort
                 parsed_req = urllib.parse.urlparse(req_url)
                 if parsed_req.scheme in ("data", "blob", "about"):
                     route.continue_()
@@ -1696,16 +1751,115 @@ class PlaywrightRenderer:
                     route.abort("blockedbyclient")
                     return
 
+                # 6. SSRF Destination Validation & Pre-fetch Pinning (Anti-TOCTOU)
                 req_host = parsed_req.hostname or ""
-                if not self._allow_private_ips:
-                    is_blocked, block_reason = is_ssrf_disallowed(req_host)
+                disallow_dest = not self._allow_private_ips or (
+                    self._block_private_subrequests and req_url != url
+                )
+                if disallow_dest:
+                    is_blocked, block_reason, valid_ips = resolve_and_validate_destination(
+                        req_host, allow_private_ips=False
+                    )
                     if is_blocked:
                         logger.warning("SSRF blocked route in Playwright: %s (%s)", req_url, block_reason)
                         ssrf_abort_events.append((req_url, block_reason))
                         route.abort("accessdenied")
                         return
+                    if valid_ips and self._pin_manager:
+                        self._pin_manager.pin(req_host, valid_ips[0])
+                else:
+                    if self._pin_manager:
+                        _, _, valid_ips = resolve_and_validate_destination(
+                            req_host, allow_private_ips=True
+                        )
+                        if valid_ips:
+                            self._pin_manager.pin(req_host, valid_ips[0])
 
-                route.continue_()
+                # 7. Shared Rate Limiting
+                if self._limiter is not None and req_host:
+                    try:
+                        self._limiter.wait(req_host, deadline=eff_deadline)
+                    except Exception:
+                        pass
+
+                # 8. Timeouts clamped to remaining AuditDeadline
+                if eff_deadline:
+                    c_conn, c_req = eff_deadline.child_timeout_tuple(CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+                    if eff_deadline.expired() or eff_deadline.remaining() <= 0.001:
+                        route.abort("timedout")
+                        return
+                    hop_timeout = (c_conn, c_req)
+                else:
+                    hop_timeout = (CONNECT_TIMEOUT, REQUEST_TIMEOUT)
+
+                # 9. Controlled Secure Fetch with DNS-Pinned Transport
+                fwd_headers = {}
+                for hk, hv in req.headers.items():
+                    if hk.lower() not in ("host", "connection", "content-length", "accept-encoding"):
+                        fwd_headers[hk] = hv
+
+                try:
+                    fetch_res = _safe_fetch_with_redirects(
+                        session=self._session,
+                        method=method,
+                        url=req_url,
+                        headers=fwd_headers,
+                        pin_manager=self._pin_manager,
+                        allow_private_ips=(self._allow_private_ips and not (self._block_private_subrequests and req_url != url)),
+                        block_private_redirects=True,
+                        max_redirects=max(1, MAX_BROWSER_REDIRECTS - chain_len),
+                        limiter=self._limiter,
+                        timeout=hop_timeout,
+                        stream=False,
+                        deadline=eff_deadline,
+                    )
+                except Exception as exc:
+                    logger.debug("Browser route fetch error for %s: %s", req_url, exc)
+                    route.abort("failed")
+                    return
+
+                if fetch_res.is_ssrf_blocked:
+                    logger.warning("SSRF blocked browser fetch for %s: %s", req_url, fetch_res.error)
+                    ssrf_abort_events.append((fetch_res.final_url or req_url, fetch_res.error or "SSRF blocked"))
+                    route.abort("accessdenied")
+                    return
+
+                if fetch_res.is_too_many_redirects:
+                    redirect_abort_events.append((req_url, len(fetch_res.redirect_chain)))
+                    route.abort("failed")
+                    return
+
+                if fetch_res.is_timeout:
+                    route.abort("timedout")
+                    return
+
+                if fetch_res.response is None:
+                    route.abort("failed")
+                    return
+
+                resp = fetch_res.response
+
+                # Clean response headers for browser fulfillment (strip hop-by-hop & compression)
+                clean_headers = {}
+                for k, v in resp.headers.items():
+                    if k.lower() in ("content-encoding", "transfer-encoding", "connection", "keep-alive"):
+                        continue
+                    clean_headers[k] = v
+
+                raw_body = resp.content or b""
+                if len(raw_body) > MAX_RESPONSE_BYTES:
+                    raw_body = raw_body[:MAX_RESPONSE_BYTES]
+                clean_headers["content-length"] = str(len(raw_body))
+
+                try:
+                    route.fulfill(
+                        status=resp.status_code,
+                        headers=clean_headers,
+                        body=raw_body,
+                    )
+                except Exception as fulfill_exc:
+                    logger.debug("Failed to fulfill route for %s: %s", req_url, fulfill_exc)
+                    route.abort("failed")
 
             context.route("**/*", intercept_route)
 
@@ -1948,7 +2102,12 @@ class PlaywrightRenderer:
         return result
 
     def close(self) -> None:
-        """Shut down the Playwright browser."""
+        """Shut down the Playwright browser and release owned session resources."""
+        if getattr(self, "_own_session", False) and self._session:
+            try:
+                self._session.close()
+            except Exception:
+                pass
         try:
             if self._browser:
                 self._browser.close()
@@ -1961,6 +2120,12 @@ class PlaywrightRenderer:
                 self._playwright = None
         except Exception:
             pass
+        finally:
+            import asyncio
+            try:
+                asyncio.set_event_loop(None)
+            except Exception:
+                pass
 
     def __enter__(self) -> "PlaywrightRenderer":
         return self
