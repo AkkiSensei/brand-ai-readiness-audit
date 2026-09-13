@@ -53,7 +53,7 @@ for p in (_HTTP_SCRIPTS, _SFE_SCRIPTS, _TEC_SCRIPTS, _ER_SCRIPTS, _ORCH_SCRIPTS)
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-from http_client import HttpClient, PageResult, PlaywrightRenderer, is_ssrf_disallowed  # type: ignore[import]
+from http_client import AuditDeadline, HttpClient, PageResult, PlaywrightRenderer, is_ssrf_disallowed  # type: ignore[import]
 import crawl_audit  # type: ignore[import]
 import sfe_audit  # type: ignore[import]
 import tec_audit  # type: ignore[import]
@@ -92,8 +92,11 @@ _SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 # NORMALISATION: domain findings -> schema findings
 # ===================================================================
 
-def _normalise_finding(raw: dict, domain_name: str, target_url: str) -> dict:
+def _normalise_finding(raw: Any, domain_name: str, target_url: str) -> dict:
     """Convert a Step-2 domain finding into the report-schema Finding shape."""
+    if not isinstance(raw, dict):
+        raw = {"title": str(raw), "evidence": str(raw)}
+
     # Category normalisation
     raw_cat = raw.get("category", "")
     valid_cats = {
@@ -160,7 +163,7 @@ def _normalise_finding(raw: dict, domain_name: str, target_url: str) -> dict:
         "related_to": [],
     }
 
-    if "source" in raw:
+    if "source" in raw and raw["source"] in ("static", "rendered"):
         finding["source"] = raw["source"]
 
     pages_affected = raw.get("pages_affected")
@@ -210,11 +213,20 @@ def _deduplicate(findings: list[dict]) -> list[dict]:
 # ===================================================================
 
 def _sort_findings(findings: list[dict]) -> list[dict]:
-    """Sort by severity (critical first), then category, then title."""
+    """Sort canonically by severity (critical first), category, local_id, title, and evidence.
+    
+    Establishes a complete total order so that no two findings ever have an
+    ambiguous or arrival-dependent relative ordering.
+    """
     def sort_key(f: dict) -> tuple:
         sev = f.get("severity", "info")
         sev_idx = _SEVERITY_ORDER.index(sev) if sev in _SEVERITY_ORDER else 99
-        return (sev_idx, f.get("category", ""), f.get("title", ""))
+        cat = str(f.get("category", ""))
+        lid = str(f.get("_local_id", "") or f.get("local_id", ""))
+        title = str(f.get("title", ""))
+        ev = f.get("evidence", "")
+        ev_str = json.dumps(ev, sort_keys=True) if isinstance(ev, (dict, list)) else str(ev)
+        return (sev_idx, cat, lid, title, ev_str)
     return sorted(findings, key=sort_key)
 
 
@@ -250,14 +262,9 @@ def _resolve_related_to(findings: list[dict]) -> list[dict]:
                 final = local_to_final.get(ref)
                 if final and final != f["id"] and final in final_ids:
                     resolved.append(final)
-        # Deduplicate while preserving order
-        seen_refs: set[str] = set()
-        deduped_resolved: list[str] = []
-        for r in resolved:
-            if r not in seen_refs:
-                seen_refs.add(r)
-                deduped_resolved.append(r)
-        f["related_to"] = deduped_resolved
+        # Deduplicate and sort canonically
+        unique_resolved = sorted(set(resolved))
+        f["related_to"] = unique_resolved
 
     return findings
 
@@ -319,15 +326,18 @@ def _build_coverage(
             }
         else:
             pages_checked = result.get("pages_analyzed", 0)
+            errors_list = result.get("errors", [])
             domain_low_conf = min(low_conf_count, pages_checked) if pages_checked > 0 else 0
             cov_entry: dict[str, Any] = {
                 "pages_checked": pages_checked,
                 "checks_run": len(result.get("findings", [])),
-                "errors": len(result.get("errors", [])),
+                "errors": len(errors_list),
                 "render_confidence": "low" if domain_low_conf > 0 else "high",
                 "pages_with_low_render_confidence": domain_low_conf,
             }
-            if domain_low_conf > 0:
+            if errors_list:
+                cov_entry["notes"] = "; ".join(str(e) for e in errors_list[:3])
+            elif domain_low_conf > 0:
                 pct = round((domain_low_conf / total_pages) * 100)
                 if schema_key == "crawl_render_access":
                     cov_entry["notes"] = (
@@ -355,10 +365,17 @@ def _build_coverage(
 def _build_proactive_strings(
     domain_results: dict[str, dict | None],
 ) -> list[str]:
-    """Collect proactive_candidates from domain runners as plain strings."""
+    """Collect proactive_candidates from domain runners in canonical order as plain strings."""
     strings: list[str] = []
     seen: set[str] = set()
-    for result in domain_results.values():
+    canonical_domain_order = [
+        "crawl-render-access",
+        "structured-fact-extraction",
+        "trust-entity-corroboration",
+        "engagement-retention",
+    ]
+    for domain_name in canonical_domain_order:
+        result = domain_results.get(domain_name)
         if result is None:
             continue
         for rec in result.get("proactive_candidates", []):
@@ -375,6 +392,7 @@ def _build_proactive_strings(
                 full = rec
             else:
                 continue
+            full = full.strip()
             if full and full not in seen and len(full) >= 10:
                 seen.add(full)
                 strings.append(full)
@@ -514,6 +532,10 @@ def run_audit(
     Returns a fully validated JSON-Schema-compliant report dict.
     """
     t_start = time.monotonic()
+    deadline: Optional[AuditDeadline] = kwargs.get("deadline")
+    if deadline is None:
+        deadline = AuditDeadline.from_budget(timeout_s, started_at=t_start)
+
     if "render_js" in kwargs:
         render_js = bool(kwargs["render_js"])
     if "renderer" in kwargs and kwargs["renderer"] is not None:
@@ -539,7 +561,7 @@ def run_audit(
                 reason="ssrf_disallowed",
             )
 
-    client = HttpClient(allow_private_ips=is_local_target)
+    client = HttpClient(allow_private_ips=is_local_target, deadline=deadline)
 
     own_renderer = False
     if render_js and renderer is None:
@@ -548,14 +570,20 @@ def run_audit(
                 rate_limiter=client._limiter,
                 robots_cache=client.robots,
                 allow_private_ips=client._allow_private_ips,
+                deadline=deadline,
             )
             own_renderer = True
         except Exception as exc:
             logger.warning("Failed to initialize PlaywrightRenderer: %s", exc)
             renderer = None
+    elif renderer is not None:
+        renderer.set_deadline(deadline)
 
     try:
-        return _run_pipeline(target_url, max_pages, timeout_s, client, t_start, renderer=renderer)
+        return _run_pipeline(
+            target_url, max_pages, timeout_s, client, t_start,
+            renderer=renderer, deadline=deadline,
+        )
     finally:
         client.close()
         if own_renderer and renderer is not None:
@@ -565,6 +593,74 @@ def run_audit(
                 pass
 
 
+def _validate_and_sanitize_skill_output(raw_result: Any, domain_name: str) -> dict:
+    """Validate and sanitize output from a domain audit runner.
+    
+    Guarantees that the orchestrator receives a well-formed dict matching:
+      - domain: str
+      - pages_analyzed: int >= 0
+      - pages_discovered: int >= 0
+      - errors: list[str]
+      - findings: list[dict]
+      - proactive_candidates: list
+    Tolerates None, non-dict payloads, missing keys, and malformed findings.
+    """
+    if not isinstance(raw_result, dict):
+        err = f"Domain {domain_name} returned non-dict payload of type {type(raw_result).__name__}"
+        logger.warning(err)
+        return {
+            "domain": domain_name,
+            "pages_analyzed": 0,
+            "pages_discovered": 0,
+            "errors": [err],
+            "findings": [],
+            "proactive_candidates": [],
+        }
+
+    try:
+        pages_analyzed = max(0, int(raw_result.get("pages_analyzed", 0) or 0))
+    except (ValueError, TypeError):
+        pages_analyzed = 0
+
+    try:
+        pages_discovered = max(0, int(raw_result.get("pages_discovered", 0) or 0))
+    except (ValueError, TypeError):
+        pages_discovered = 0
+
+    proactive_raw = raw_result.get("proactive_candidates", [])
+    if isinstance(proactive_raw, (list, tuple)):
+        proactive = list(proactive_raw)
+    else:
+        proactive = []
+
+    sanitized: dict[str, Any] = {
+        "domain": str(raw_result.get("domain", domain_name)),
+        "pages_analyzed": pages_analyzed,
+        "pages_discovered": pages_discovered,
+        "errors": [str(e) for e in raw_result.get("errors", []) if e is not None],
+        "findings": [],
+        "proactive_candidates": proactive,
+    }
+
+    # Pass through optional crawl-render-access fields if present
+    for opt_key in (
+        "crawl_frontier", "page_results", "coverage", "network_requests",
+        "performance_metrics", "rendered_word_count", "static_word_count", "csr_blanking_ratio"
+    ):
+        if opt_key in raw_result:
+            sanitized[opt_key] = raw_result[opt_key]
+
+    raw_findings = raw_result.get("findings", [])
+    if isinstance(raw_findings, list):
+        for f in raw_findings:
+            if isinstance(f, dict):
+                sanitized["findings"].append(f)
+            else:
+                logger.warning("Ignoring non-dict finding in domain %s: %r", domain_name, f)
+
+    return sanitized
+
+
 def _run_pipeline(
     target_url: str,
     max_pages: int,
@@ -572,6 +668,7 @@ def _run_pipeline(
     client: HttpClient,
     t_start: float,
     renderer: Optional[PlaywrightRenderer] = None,
+    deadline: Optional[AuditDeadline] = None,
 ) -> dict:
     """Internal pipeline — separated for testability."""
     domain_results: dict[str, dict | None] = {
@@ -586,10 +683,11 @@ def _run_pipeline(
     # STEP 1: Crawl audit (produces frontier)
     # ==============================================================
     try:
-        crawl_result = crawl_audit.run_audit(
+        crawl_raw = crawl_audit.run_audit(
             target_url, client, max_pages=max_pages, timeout_s=timeout_s, t_start=t_start,
-            renderer=renderer,
+            renderer=renderer, deadline=deadline,
         )
+        crawl_result = _validate_and_sanitize_skill_output(crawl_raw, "crawl-render-access")
         domain_results["crawl-render-access"] = crawl_result
     except Exception as exc:
         all_errors.append(f"crawl-render-access crashed: {exc}")
@@ -680,7 +778,7 @@ def _run_pipeline(
 
         # Check timeout budget
         elapsed = time.monotonic() - t_start
-        if elapsed >= timeout_s:
+        if (deadline and deadline.expired()) or elapsed >= timeout_s:
             domain_results[domain_name] = {
                 "domain": domain_name,
                 "pages_analyzed": 0,
@@ -692,15 +790,16 @@ def _run_pipeline(
             continue
 
         try:
-            result = module.run_audit(
+            raw_res = module.run_audit(
                 target_url,
                 client,
                 crawl_frontier=frontier,
                 page_results=page_results,
                 timeout_s=timeout_s,
                 t_start=t_start,
+                deadline=deadline,
             )
-            domain_results[domain_name] = result
+            domain_results[domain_name] = _validate_and_sanitize_skill_output(raw_res, domain_name)
         except Exception as exc:
             all_errors.append(f"{domain_name} crashed: {exc}")
             domain_results[domain_name] = {
@@ -724,13 +823,11 @@ def _run_pipeline(
             merged.append(normalised)
 
     # ==============================================================
-    # STEP 5: Deduplicate
+    # STEP 5: Canonical Sort then Deduplicate
     # ==============================================================
-    deduped = _deduplicate(merged)
-
-    # ==============================================================
-    # STEP 6: Sort by severity
-    # ==============================================================
+    # Canonical sort first so deduplication order is 100% deterministic
+    merged_sorted = _sort_findings(merged)
+    deduped = _deduplicate(merged_sorted)
     sorted_findings = _sort_findings(deduped)
 
     # ==============================================================
@@ -762,10 +859,9 @@ def _run_pipeline(
         norm["category"] = "proactive"
         sorted_findings.append(norm)
 
-    # Re-deduplicate after proactive injection
+    # Re-deduplicate after proactive injection using canonical sorting
+    sorted_findings = _sort_findings(sorted_findings)
     sorted_findings = _deduplicate(sorted_findings)
-
-    # Re-sort: severity order maintained (info = proactive at end)
     sorted_findings = _sort_findings(sorted_findings)
 
     # Re-assign IDs sequentially (gap-free)
@@ -823,10 +919,19 @@ def _run_pipeline(
         res and any("timeout budget" in str(e).lower() for e in res.get("errors", []))
         for res in domain_results.values()
     )
+    subsystem_failures = [
+        domain_name for domain_name, res in domain_results.items()
+        if res and any("exception" in str(e).lower() or "crashed" in str(e).lower() for e in res.get("errors", []))
+    ]
     if timeout_skipped:
         overall_status = "partial"
         blocked_reason = "timeout_budget_exhausted"
         status_msg = "Audit completed partially: timeout budget was reached before all domain checks finished."
+    elif subsystem_failures or all_errors:
+        overall_status = "partial"
+        blocked_reason = "subsystem_failure"
+        failed_list = ", ".join(subsystem_failures) if subsystem_failures else "subsystem error"
+        status_msg = f"Audit completed partially: failures in subsystem(s) [{failed_list}]."
     else:
         overall_status = "completed"
         blocked_reason = None

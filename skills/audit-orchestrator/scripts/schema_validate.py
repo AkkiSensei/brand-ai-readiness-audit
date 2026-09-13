@@ -83,6 +83,7 @@ _FINDING_ALLOWED = {
     "references",
     "duplicate_of",
     "confidence",
+    "source",
 }
 
 
@@ -377,6 +378,12 @@ def _validate_finding(
         elif conf < 0.0 or conf > 1.0:
             errors.append(f"{prefix}.confidence must be between 0.0 and 1.0, got {conf}")
 
+    # source (optional string: "static" or "rendered")
+    if "source" in finding:
+        src = finding["source"]
+        if src not in ("static", "rendered"):
+            errors.append(f"{prefix}.source must be 'static' or 'rendered', got '{src}'")
+
 
 def _validate_skill_coverage(cov: Any, domain: str, errors: list[str]) -> None:
     """Validate a SkillCoverage object."""
@@ -398,6 +405,11 @@ def _validate_skill_coverage(cov: Any, domain: str, errors: list[str]) -> None:
         "notes",
         "render_confidence",
         "pages_with_low_render_confidence",
+        "network_requests",
+        "performance_metrics",
+        "rendered_word_count",
+        "static_word_count",
+        "csr_blanking_ratio",
     }
     extra = set(cov.keys()) - allowed
     if extra:

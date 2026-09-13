@@ -398,7 +398,7 @@ def _discover_frontier(
 
     # -- 2. Sitemaps from robots.txt --
     sm_from_robots = client.robots.get_sitemaps(target_url)
-    sm_candidates = list(sm_from_robots)
+    sm_candidates = sorted(list(dict.fromkeys(sm_from_robots)))
 
     # Fallback: try standard paths
     if not sm_candidates:
@@ -580,7 +580,7 @@ def _check_cr002(
                 "WAF / anti-bot challenge blocking crawler access",
                 "critical",
                 f"{len(waf_urls)} URL(s) blocked by active WAF or anti-bot challenge: "
-                + "; ".join(waf_urls[:5])
+                + "; ".join(sorted(waf_urls)[:5])
                 + ("..." if len(waf_urls) > 5 else ""),
                 "Configure edge WAF and bot-defense rules to permit legitimate AI crawler "
                 "user-agents or IPs, or provide dedicated machine-readable sitemaps/APIs.",
@@ -594,7 +594,7 @@ def _check_cr002(
                 "Pages returning non-OK HTTP status codes",
                 "high",
                 f"{len(bad_codes)} URL(s) with unexpected status: "
-                + "; ".join(bad_codes[:5])
+                + "; ".join(sorted(bad_codes)[:5])
                 + ("..." if len(bad_codes) > 5 else ""),
                 "Fix server responses so all public pages return 200 (OK) or "
                 "use 301 for permanent redirects. Remove or correct links to "
@@ -609,7 +609,7 @@ def _check_cr002(
                 "Excessive redirect chains detected",
                 "low",
                 f"{len(long_redirects)} URL(s) with >2 redirect hops: "
-                + "; ".join(long_redirects[:5]),
+                + "; ".join(sorted(long_redirects)[:5]),
                 "Shorten redirect chains to at most 1-2 hops to avoid crawler "
                 "timeouts and wasted crawl budget.",
                 related=["CR-008"],
@@ -687,6 +687,13 @@ def _check_cr003_cr004(
                     else:
                         pr.render_confidence = "high"
                     continue
+                else:
+                    # Epistemic honesty: when renderer was provided but rendering failed,
+                    # timed out, or was blocked, we CANNOT observe the post-JS DOM.
+                    # This is an observation limitation, NOT evidence that dynamic content
+                    # is missing. Do not flag CR-003 or CR-004.
+                    pr.render_confidence = "low"
+                    continue
 
             # --- Static-only heuristic (used when renderer is None or render skipped) ---
             raw_ratio = extract_text_ratio(pr.soup)
@@ -707,7 +714,7 @@ def _check_cr003_cr004(
             is_spa = bool(has_app_root and has_module_script and word_count < 80)
             if is_spa and raw_ratio < CSR_WARN_THRESH:
                 spa_shell_urls.add(url)
-                display.setdefault(url, f"{url} (SPA shell)")
+                display.setdefault(url, f"{url} (SPA shell in raw HTML; JS rendering unverified)")
 
             has_substantial_text = (word_count >= 250 and len(visible_text) >= 1000)
             effective_ratio = raw_ratio
@@ -851,7 +858,7 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                 "Geolocation or location-selection gate blocking catalog content",
                 "high",
                 f"{len(geo_urls)} page(s) enforce geolocation or pincode selection before catalog content renders: "
-                + "; ".join(geo_urls[:5]),
+                + "; ".join(sorted(geo_urls)[:5]),
                 "Ensure autonomous crawlers can access a default, national, or location-agnostic catalog "
                 "without requiring interactive location/pincode selection.",
                 related=["CR-003"],
@@ -865,7 +872,7 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                 "Paywall or login overlay detected blocking content",
                 "high",
                 f"{len(paywall_urls)} page(s) have paywall/login overlay patterns: "
-                + "; ".join(paywall_urls[:5]),
+                + "; ".join(sorted(paywall_urls)[:5]),
                 "Ensure that AI crawlers can access the full page content without encountering login walls. "
                 "Consider implementing metered access with first-click-free for crawler user-agents, "
                 "or use structured data (CreativeWork with isAccessibleForFree).",
@@ -880,7 +887,7 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                 "Full-viewport overlay detected blocking content",
                 "high",
                 f"{len(overlay_urls)} page(s) have full-viewport overlay styling: "
-                + "; ".join(overlay_urls[:5]),
+                + "; ".join(sorted(overlay_urls)[:5]),
                 "Ensure that modal overlays do not obstruct primary content on initial page load.",
                 related=["CR-003"],
                 pages_affected=len(overlay_urls),
@@ -897,10 +904,16 @@ def _check_cr006_cr007(
     client: HttpClient,
     sitemap_xml: str,
     sitemap_from_robots: bool,
+    sitemap_timeout: bool = False,
 ) -> list[dict]:
     """CR-006 (medium) / CR-007 (low): Sitemap validation."""
     findings: list[dict] = []
     try:
+        # Epistemic honesty: if sitemap discovery was truncated by timeout budget,
+        # do NOT assert that the site lacks an XML sitemap.
+        if sitemap_timeout:
+            return findings
+
         # CR-006: No sitemap at all
         if not sitemap_xml:
             findings.append(_finding(
@@ -1030,7 +1043,7 @@ def _check_cr008(page_results: dict[str, PageResult]) -> list[dict]:
                 "Public pages marked with noindex directive",
                 "high",
                 f"{len(noindex_pages)} page(s) carry noindex (meta or "
-                f"X-Robots-Tag): " + "; ".join(noindex_pages[:5]),
+                f"X-Robots-Tag): " + "; ".join(sorted(noindex_pages)[:5]),
                 "Remove noindex directives from pages you want AI engines to "
                 "discover. If pages should genuinely be excluded, ensure they "
                 "are not linked from navigation or sitemaps.",
@@ -1117,12 +1130,13 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
 
     # 2. Run all checks
     findings: list[dict] = []
+    sitemap_timeout = any("timeout budget reached" in str(e).lower() for e in errors)
     checks = [
         lambda: _check_cr001(target_url, http_client),
         lambda: _check_cr002(page_results),
         lambda: _check_cr003_cr004(page_results, renderer),
         lambda: _check_cr005(page_results),
-        lambda: _check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots),
+        lambda: _check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots, sitemap_timeout=sitemap_timeout),
         lambda: _check_cr008(page_results),
     ]
     for check_fn in checks:
@@ -1153,6 +1167,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
             FrontierEntry(
                 u,
                 render_confidence=getattr(page_results.get(u), "render_confidence", "high"),
+                render_state=getattr(page_results.get(u), "render_state", "STATIC_ONLY"),
             )
             for u in frontier
         ],

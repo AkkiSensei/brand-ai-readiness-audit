@@ -28,7 +28,7 @@ _SCRIPTS_DIR = (
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from http_client import HttpClient, PageResult, normalise_url, is_same_origin
+from http_client import AuditDeadline, HttpClient, PageResult, normalise_url, is_same_origin
 
 logger = logging.getLogger(__name__)
 
@@ -344,22 +344,35 @@ def _check_tc001(
     try:
         all_sameas: list[str] = []
         has_any_sameas = False
+        has_org_block = False
+        valid_pages: list[str] = []
 
         for url in frontier:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
+            valid_pages.append(url)
             blocks = _extract_jsonld_blocks(pr.soup)
             for block in blocks:
                 types = _get_types(block)
                 if not _is_org_type(types):
                     continue
+                has_org_block = True
                 sameas = block.get("sameAs", [])
                 if isinstance(sameas, str):
                     sameas = [sameas]
                 if isinstance(sameas, list) and sameas:
                     has_any_sameas = True
                     all_sameas.extend(sameas)
+
+        if not valid_pages:
+            return findings
+
+        # Epistemic honesty: only evaluate sameAs when an Organization schema was actually observed.
+        # If no Organization schema was found on the site, do not claim that the Organization schema
+        # is missing sameAs (SF-001 already notes the absence of Organization schema).
+        if not has_org_block:
+            return findings
 
         if not has_any_sameas:
             findings.append(_finding(
@@ -373,11 +386,13 @@ def _check_tc001(
                 "to your official Wikipedia page, Wikidata entry, LinkedIn "
                 "company page, and verified social media profiles.",
                 related=["SF-001"],
+                pages_affected=len(valid_pages),
+                pages_checked=len(valid_pages),
             ))
             return findings
 
         # Validate sameAs URLs
-        unique_sameas = list(set(all_sameas))
+        unique_sameas = sorted(set(all_sameas))
         invalid_urls: list[str] = []
         non_authoritative: list[str] = []
 
@@ -404,7 +419,7 @@ def _check_tc001(
                 "Invalid sameAs URLs in Organization schema",
                 "medium",
                 f"{len(invalid_urls)} sameAs URL(s) are malformed: "
-                + "; ".join(invalid_urls[:5]),
+                + "; ".join(sorted(invalid_urls)[:5]),
                 "Fix or remove invalid sameAs URLs. Each must be a valid "
                 "HTTP/HTTPS URL pointing to an authoritative profile.",
             ))
@@ -640,6 +655,7 @@ def _check_tc003(
     http_client: HttpClient,
     t_start: float | None = None,
     timeout_s: float | None = None,
+    deadline: Any = None,
 ) -> list[dict]:
     """TC-003 (high): Claimed external partner or accreditation links broken.
 
@@ -668,11 +684,16 @@ def _check_tc003(
         affected_pages: set[str] = set()
 
         for target_url, src_page in unique_urls[:MAX_CLAIM_VERIFICATION_URLS]:
+            eff_deadline = deadline if deadline is not None else getattr(http_client, "_deadline", None)
+            if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                break
             if t_start is not None and timeout_s is not None:
                 if time.monotonic() - t_start >= timeout_s:
                     break
             try:
                 head = http_client.head(target_url)
+                if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                    break
                 is_walled_garden = any(
                     d in target_url.lower()
                     for d in ("linkedin.com", "twitter.com", "x.com", "facebook.com", "instagram.com")
@@ -683,10 +704,14 @@ def _check_tc003(
                     # Anti-bot response confirms endpoint exists
                     continue
                 else:
+                    if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                        break
                     code = head.status_code or "no response"
                     failed.append(f"{target_url} (HTTP {code})")
                     affected_pages.add(src_page)
             except Exception as exc:
+                if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
+                    break
                 failed.append(f"{target_url} (error: {exc})")
                 affected_pages.add(src_page)
 
@@ -697,7 +722,7 @@ def _check_tc003(
                 "high",
                 f"{len(failed)} outbound verification link(s) for claimed "
                 f"credentials returned broken HTTP status: "
-                + "; ".join(failed[:5]),
+                + "; ".join(sorted(failed)[:5]),
                 "Audit and update outbound accreditation and trust verification "
                 "links to ensure all targets resolve cleanly.",
                 related=[],
@@ -726,7 +751,7 @@ def _check_tc005(
         if not unlinked:
             return findings
 
-        sample_claims = ['"' + c["text"] + '"' for c in unlinked[:3]]
+        sample_claims = ['"' + c["text"] + '"' for c in sorted(unlinked, key=lambda c: (c.get("source_url", ""), c.get("text", "")))[:3]]
         affected_pages = len(set(c["source_url"] for c in unlinked))
 
         findings.append(_finding(
@@ -767,11 +792,13 @@ def _check_tc004_tc006(
     try:
         brand_names: list[str] = []
         org_blocks: list[dict] = []
+        valid_pages: list[str] = []
 
         for url in frontier:
             pr = page_results.get(url)
             if not pr or not pr.soup:
                 continue
+            valid_pages.append(url)
             blocks = _extract_jsonld_blocks(pr.soup)
             for block in blocks:
                 if _is_org_type(_get_types(block)):
@@ -779,6 +806,9 @@ def _check_tc004_tc006(
                     name = block.get("name", "")
                     if name and isinstance(name, str):
                         brand_names.append(name.strip())
+
+        if not valid_pages:
+            return findings
 
         # TC-004: Brand entity ambiguity detection via structural evidence
         if brand_names:
@@ -804,6 +834,8 @@ def _check_tc004_tc006(
                     "connect to a Wikidata entity in sameAs, specify legalName, "
                     "address, foundingDate, and a detailed description.",
                     related=["TC-006", "TC-001"],
+                    pages_affected=len(valid_pages),
+                    pages_checked=len(valid_pages),
                 ))
 
         # TC-004: Capitalisation variants
@@ -822,6 +854,8 @@ def _check_tc004_tc006(
                     "and structured data. Use alternateName for legitimate "
                     "abbreviations or translations.",
                     related=["TC-002"],
+                    pages_affected=len(valid_pages),
+                    pages_checked=len(valid_pages),
                 ))
 
         # TC-006: Missing Organization disambiguators
@@ -839,7 +873,7 @@ def _check_tc004_tc006(
                 break  # Check primary org block only
 
             if missing_disambig:
-                unique_missing = list(dict.fromkeys(missing_disambig))
+                unique_missing = sorted(dict.fromkeys(missing_disambig))
                 findings.append(_finding(
                     "TC-006",
                     "Organization schema missing disambiguation properties",
@@ -850,6 +884,8 @@ def _check_tc004_tc006(
                     "to your Organization JSON-LD to help AI engines "
                     "distinguish your brand from others with similar names.",
                     related=["TC-004"],
+                    pages_affected=len(valid_pages),
+                    pages_checked=len(valid_pages),
                 ))
         else:
             findings.append(_finding(
@@ -861,6 +897,8 @@ def _check_tc004_tc006(
                 "Add an Organization JSON-LD block to your homepage with "
                 "name, url, foundingDate, address, and description.",
                 related=["SF-001"],
+                pages_affected=len(valid_pages),
+                pages_checked=len(valid_pages),
             ))
 
     except Exception as exc:
@@ -959,7 +997,7 @@ def _check_rendered_trust_signals(
             "Dynamic sameAs social/entity graph links detected post-rendering",
             "info",
             f"Authoritative entity links appear in post-JS rendered DOM on "
-            f"{len(rendered_sameas_pages)} page(s): " + "; ".join(rendered_sameas_pages[:3]) +
+            f"{len(rendered_sameas_pages)} page(s): " + "; ".join(sorted(rendered_sameas_pages)[:3]) +
             ", but are absent in raw static HTML.",
             "Ensure authoritative entity and social links are present in static HTML "
             "markup to guarantee discovery by non-JS crawlers.",
@@ -975,26 +1013,35 @@ def _check_rendered_trust_signals(
 # ===================================================================
 def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     """Execute Trust & Entity Corroboration checks TC-001 -> TC-006."""
-    frontier: list[str] = kwargs.get("crawl_frontier", [target_url])
-    page_results: dict[str, PageResult] = kwargs.get("page_results", {})
+    frontier_raw = kwargs.get("crawl_frontier", [target_url])
+    if not isinstance(frontier_raw, list):
+        frontier_raw = [target_url]
+    frontier: list[str] = [str(u) for u in frontier_raw if u]
+    if not frontier:
+        frontier = [target_url]
+
+    page_results_raw = kwargs.get("page_results", {})
+    page_results: dict[str, PageResult] = page_results_raw if isinstance(page_results_raw, dict) else {}
+    t_start: float | None = kwargs.get("t_start")
+    timeout_s: float | None = kwargs.get("timeout_s")
+    deadline = kwargs.get("deadline") or getattr(http_client, "_deadline", None)
 
     if not page_results:
         for url in frontier:
+            if deadline and deadline.expired():
+                break
             try:
-                pr = http_client.get(url)
+                pr = http_client.get(url, deadline=deadline)
                 page_results[pr.url or url] = pr
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
-
-    t_start: float | None = kwargs.get("t_start")
-    timeout_s: float | None = kwargs.get("timeout_s")
 
     errors: list[str] = []
     findings: list[dict] = []
 
     findings.extend(_check_tc001(frontier, page_results, http_client))
     findings.extend(_check_tc002(frontier, page_results))
-    findings.extend(_check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s))
+    findings.extend(_check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s, deadline=deadline))
     findings.extend(_check_tc005(frontier, page_results))
     findings.extend(_check_tc004_tc006(frontier, page_results))
     findings.extend(_check_rendered_trust_signals(frontier, page_results))
