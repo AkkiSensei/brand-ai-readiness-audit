@@ -527,6 +527,7 @@ class FetchState(str, Enum):
     BLOCKED_BY_ROBOTS = "blocked_by_robots"    # Disallowed by robots.txt
     RATE_LIMITED = "rate_limited"              # HTTP 429 or rate-limited response
     WAF_BLOCKED = "waf_blocked"                # Active WAF / bot challenge (403/429/503 with challenge headers/signatures)
+    UNUSABLE_CHALLENGE = "unusable_challenge"  # HTTP 200 but behaviorally a JS/WAF/CAPTCHA challenge shell
     FETCH_FAILED = "fetch_failed"              # Network drop, timeout, DNS failure, SSL failure, SSRF blocked
     HTTP_ERROR = "http_error"                  # HTTP 4xx / 5xx error responses (not WAF/rate-limit)
     REDIRECT_FAILED = "redirect_failed"        # Redirect cycle, too many redirects, or redirect to blocked destination
@@ -643,8 +644,14 @@ class PageResult:
 
     @property
     def is_usable_content(self) -> bool:
-        """True if the page was successfully fetched and contains inspectable DOM content."""
-        return self.effective_fetch_state == FetchState.FETCHED_OK and self.soup is not None
+        """True if the page was successfully fetched, is not a challenge/interstitial shell,
+        and contains inspectable DOM content."""
+        fs = self.effective_fetch_state
+        return (
+            fs == FetchState.FETCHED_OK
+            and self.fetch_state != FetchState.UNUSABLE_CHALLENGE
+            and self.soup is not None
+        )
 
     @property
     def is_html(self) -> bool:
@@ -662,6 +669,256 @@ class PageResult:
             ".mp4", ".mp3", ".zip", ".gz"
         )
         return not any(path.endswith(ext) for ext in non_html_exts)
+
+
+# ---------------------------------------------------------------------------
+# Generic HTTP-200 Challenge / Interstitial Detection
+# ---------------------------------------------------------------------------
+# Uses multiple corroborating behavioral signals — NO vendor-name lists.
+# Requires ≥ CHALLENGE_MIN_SIGNALS to classify a page as UNUSABLE_CHALLENGE,
+# which prevents any downstream DOM-quality findings from being generated.
+
+import hashlib as _hashlib
+
+# Title patterns that are strongly associated with challenge/interstitial pages.
+# These are generic behavioral terms, not vendor names.
+_CHALLENGE_TITLE_RE = re.compile(
+    r"^\s*(?:checking|challenge|security\s+check|please\s+wait|attention\s+required|"
+    r"ddos\s+protection|verif(?:y|ying|ication)|access\s+denied|one\s+more\s+step|"
+    r"just\s+a\s+moment|human\s+verification|bot\s+check|browser\s+check|"
+    r"are\s+you\s+a\s+(?:human|robot)|captcha|loading\.\.\.|enable\s+javascript|"
+    r"site\s+is\s+protected|service\s+unavailable|ray\s+id|under\s+attack)\s*$",
+    re.IGNORECASE,
+)
+
+# Structural patterns in the body text that are classic challenge content
+_CHALLENGE_BODY_RE = re.compile(
+    r"(?:complete\s+(?:the\s+)?(?:security\s+)?check|"
+    r"you\s+(?:have\s+been\s+)?blocked|"
+    r"press\s+&\s+hold|slide\s+to\s+verify|"
+    r"checking\s+your\s+browser|"
+    r"please\s+enable\s+(?:javascript|cookies)|"
+    r"proving\s+you\s+are\s+human|"
+    r"your\s+ip\s+(?:has\s+been|is)\s+(?:blocked|flagged)|"
+    r"automated\s+access|bot\s+protection)\b",
+    re.IGNORECASE,
+)
+
+# Minimum number of corroborating signals required to classify as UNUSABLE_CHALLENGE.
+# Set to 3 to prevent false-positives on legitimate sparse or SPA pages.
+CHALLENGE_MIN_SIGNALS: int = 3
+
+
+def detect_challenge_page(
+    html: Optional[str],
+    soup: Optional["BeautifulSoup"],
+    url: str = "",
+) -> tuple[bool, float, list[str]]:
+    """Detect whether a page is a JS/WAF/CAPTCHA challenge shell using behavioral signals.
+
+    Uses multiple corroborating signals — not vendor-specific string matching.
+    Requires at least CHALLENGE_MIN_SIGNALS (default=3) to classify as a challenge,
+    preventing false-positives on legitimate sparse pages or normal SPA shells.
+
+    Returns:
+        (is_challenge, confidence, signals_list)
+        - is_challenge: True if ≥ CHALLENGE_MIN_SIGNALS triggered
+        - confidence: float 0.0–1.0 proportional to signal count
+        - signals_list: human-readable list of which signals fired
+    """
+    signals: list[str] = []
+
+    if not html and not soup:
+        return False, 0.0, signals
+
+    html_text = html or ""
+    html_lower = html_text.lower()
+
+    # ── Signal 1: Generic/challenge page title ───────────────────────────────
+    title_text = ""
+    if soup is not None:
+        title_tag = soup.find("title")
+        if title_tag:
+            title_text = (title_tag.get_text() or "").strip()
+    else:
+        m = re.search(r"<title[^>]*>([^<]{0,200})</title>", html_text, re.IGNORECASE)
+        if m:
+            title_text = m.group(1).strip()
+
+    if title_text and _CHALLENGE_TITLE_RE.match(title_text):
+        signals.append(f"challenge_title:{title_text[:80]!r}")
+
+    # ── Signal 2: Script-dominant structure (scripts >> visible text) ─────────
+    script_bytes = sum(len(s.get_text() or "") for s in soup.find_all("script")) if soup else 0
+    visible_text = ""
+    if soup is not None:
+        # Remove script and style tags before getting text
+        for tag in soup.find_all(["script", "style", "noscript"]):
+            tag.decompose()
+        visible_text = soup.get_text(separator=" ", strip=True)
+        # Rebuild soup is expensive; we work with the text we extracted
+    else:
+        # Strip tags from raw HTML for rough estimate
+        visible_text = re.sub(r"<[^>]+>", " ", html_text)
+        visible_text = re.sub(r"\s+", " ", visible_text).strip()
+
+    visible_word_count = len(visible_text.split())
+    # Script-dominant: total script content is much larger than visible text
+    if script_bytes > 0 and script_bytes > max(300, visible_word_count * 8):
+        signals.append(f"script_dominant:script={script_bytes}B visible_words={visible_word_count}")
+
+    # ── Signal 3: Very low meaningful content density ────────────────────────
+    # A real page has some meaningful text. Challenge shells have near-zero.
+    if visible_word_count < 30:
+        signals.append(f"low_content_density:words={visible_word_count}")
+
+    # ── Signal 4: Absence of semantic content elements ───────────────────────
+    if soup is not None:
+        has_h1 = bool(soup.find("h1"))
+        has_p = bool(soup.find("p"))
+        has_article = bool(soup.find(["article", "main", "section"]))
+        has_nav = bool(soup.find("nav"))
+        if not has_h1 and not has_p and not has_article:
+            signals.append("no_semantic_elements:missing_h1_p_article")
+        if not has_nav and not has_h1:
+            # Combined absence of nav + h1 is a strong signal (real pages have at least one)
+            if "no_semantic_elements:missing_h1_p_article" not in signals:
+                signals.append("no_nav_no_h1")
+    else:
+        # Simple check on raw HTML
+        if not re.search(r"<(?:h1|article|main|section|nav)[>\s]", html_lower):
+            signals.append("no_semantic_elements_raw")
+
+    # ── Signal 5: Challenge body content match ────────────────────────────────
+    if _CHALLENGE_BODY_RE.search(visible_text or html_lower):
+        signals.append("challenge_body_text_pattern")
+
+    # ── Signal 6: Noscript-only meaningful content (JS-gate pattern) ─────────
+    if soup is not None:
+        noscript_tags = soup.find_all("noscript")
+        noscript_text = " ".join((t.get_text() or "") for t in noscript_tags)
+        noscript_words = len(noscript_text.split())
+        # If noscript has more words than visible content, page is JS-gated
+        if noscript_words > 5 and noscript_words >= visible_word_count:
+            signals.append(f"noscript_dominant:noscript_words={noscript_words}")
+
+    # ── Signal 7: Hidden-only form (typical challenge challenge token) ─────────
+    if soup is not None:
+        all_forms = soup.find_all("form")
+        for form in all_forms:
+            visible_inputs = [
+                i for i in form.find_all("input")
+                if (i.get("type") or "text").lower() not in ("hidden", "submit", "button")
+            ]
+            hidden_inputs = [
+                i for i in form.find_all("input")
+                if (i.get("type") or "").lower() == "hidden"
+            ]
+            if hidden_inputs and not visible_inputs:
+                signals.append("hidden_form_only:likely_challenge_token_form")
+                break
+
+    # ── Signal 8: Zero or near-zero visible links ─────────────────────────────
+    if soup is not None:
+        link_count = len(soup.find_all("a", href=True))
+        if link_count == 0:
+            signals.append("zero_visible_links")
+    elif not re.search(r"<a\s[^>]*href", html_lower):
+        signals.append("zero_visible_links_raw")
+
+    signal_count = len(signals)
+    confidence = min(1.0, signal_count / max(1, CHALLENGE_MIN_SIGNALS + 2))
+
+    # Safety gate: structural-absence signals alone are not sufficient to classify
+    # a page as a challenge. At least one "content-intent" signal must fire:
+    # challenge title, challenge body text, script dominance, hidden form, or
+    # noscript dominance. This prevents legitimate empty SPA shells, maintenance
+    # pages, and thin-content pages from being misclassified.
+    _STRUCTURAL_ABSENCE_SIGNALS = frozenset({
+        "low_content_density", "no_semantic_elements", "no_nav_no_h1",
+        "no_semantic_elements_raw", "zero_visible_links", "zero_visible_links_raw",
+    })
+    has_content_intent_signal = any(
+        not any(sig.startswith(s) for s in _STRUCTURAL_ABSENCE_SIGNALS)
+        for sig in signals
+    )
+    is_challenge = signal_count >= CHALLENGE_MIN_SIGNALS and has_content_intent_signal
+
+    if is_challenge:
+        logger.debug(
+            "detect_challenge_page: %s classified as UNUSABLE_CHALLENGE "
+            "(signals=%d/%d): %s",
+            url, signal_count, CHALLENGE_MIN_SIGNALS, signals,
+        )
+    return is_challenge, confidence, signals
+
+
+
+def detect_challenge_cluster(
+    page_results: "dict[str, PageResult]",
+    min_cluster_size: int = 3,
+) -> dict[str, list[str]]:
+    """Identify challenge-shell clustering: multiple URLs returning the same content fingerprint.
+
+    When ≥ min_cluster_size different requested URLs share the same visible-text fingerprint
+    (SHA-256 of the first 300 chars of normalized visible text), all are reclassified as
+    FetchState.UNUSABLE_CHALLENGE. This detects unknown-vendor challenge pages that present
+    identical content regardless of which URL was requested.
+
+    Returns:
+        dict mapping fingerprint -> list[url] for all detected clusters.
+        As a side-effect, sets fetch_state=UNUSABLE_CHALLENGE on clustered PageResults.
+    """
+    import hashlib
+
+    fingerprint_map: dict[str, list[str]] = {}
+
+    for url, pr in page_results.items():
+        if pr is None:
+            continue
+        # Only fingerprint HTTP-200 pages with a soup
+        if pr.status_code is None or pr.status_code < 200 or pr.status_code >= 400:
+            continue
+        if pr.soup is None and not pr.html:
+            continue
+
+        # Build a normalized fingerprint from visible text
+        if pr.soup is not None:
+            try:
+                # Work on a copy to avoid mutating the cached soup
+                import copy
+                soup_copy = copy.copy(pr.soup)
+                for tag in soup_copy.find_all(["script", "style"]):
+                    tag.decompose()
+                text = soup_copy.get_text(separator=" ", strip=True)
+            except Exception:
+                text = pr.html or ""
+        else:
+            text = re.sub(r"<[^>]+>", " ", pr.html or "")
+
+        normalized = re.sub(r"\s+", " ", text).strip().lower()[:300]
+        if len(normalized) < 10:
+            # Skip nearly-empty pages (already caught by other signals)
+            continue
+
+        fp = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()[:16]
+        fingerprint_map.setdefault(fp, []).append(url)
+
+    # Identify clusters and reclassify
+    clusters: dict[str, list[str]] = {}
+    for fp, urls in fingerprint_map.items():
+        if len(urls) >= min_cluster_size:
+            clusters[fp] = urls
+            for u in urls:
+                pr = page_results.get(u)
+                if pr is not None and pr.fetch_state != FetchState.UNUSABLE_CHALLENGE:
+                    pr.fetch_state = FetchState.UNUSABLE_CHALLENGE
+                    logger.debug(
+                        "detect_challenge_cluster: reclassified %s as UNUSABLE_CHALLENGE "
+                        "(fingerprint=%s, cluster_size=%d)",
+                        u, fp, len(urls),
+                    )
+    return clusters
 
 
 class FrontierEntry(str):
@@ -1510,7 +1767,24 @@ class HttpClient:
             except Exception:
                 pass
 
-        result.fetch_state = result.effective_fetch_state
+        # Run behavioral challenge detection on HTTP 200 responses before finalizing state.
+        # Must run AFTER soup is parsed so DOM signals are available.
+        if result.status_code is not None and 200 <= result.status_code < 400:
+            try:
+                is_chal, _conf, _sigs = detect_challenge_page(result.html, result.soup, url)
+                if is_chal:
+                    result.fetch_state = FetchState.UNUSABLE_CHALLENGE
+                    logger.info(
+                        "HttpClient.get: %s is an HTTP-200 challenge/interstitial "
+                        "(signals: %s)", url, _sigs
+                    )
+                else:
+                    result.fetch_state = result.effective_fetch_state
+            except Exception as _exc:
+                logger.debug("detect_challenge_page error for %s: %s", url, _exc)
+                result.fetch_state = result.effective_fetch_state
+        else:
+            result.fetch_state = result.effective_fetch_state
         return result
 
     def head(

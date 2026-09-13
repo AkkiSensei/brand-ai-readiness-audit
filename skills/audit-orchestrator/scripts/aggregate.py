@@ -61,6 +61,7 @@ from http_client import (  # type: ignore[import]
     is_ssrf_disallowed,
     CoverageState,
     canonicalize_url,
+    detect_challenge_cluster,
 )
 import crawl_audit  # type: ignore[import]
 import sfe_audit  # type: ignore[import]
@@ -1501,6 +1502,23 @@ def _run_pipeline(
 
     frontier: list[str] = crawl_result.get("crawl_frontier", [target_url])
     page_results: dict[str, PageResult] = crawl_result.get("page_results", {})
+
+    # ==============================================================
+    # STEP 1b: Fingerprint-based challenge cluster detection
+    # Reclassify HTTP-200 challenge shells returned for many different
+    # URLs as UNUSABLE_CHALLENGE so downstream audits skip them.
+    # ==============================================================
+    if page_results:
+        try:
+            challenge_clusters = detect_challenge_cluster(page_results, min_cluster_size=3)
+            if challenge_clusters:
+                logger.info(
+                    "detect_challenge_cluster: found %d fingerprint cluster(s) across %d URLs",
+                    len(challenge_clusters),
+                    sum(len(v) for v in challenge_clusters.values()),
+                )
+        except Exception as _cc_exc:
+            logger.debug("detect_challenge_cluster error: %s", _cc_exc)
 
     # ==============================================================
     # STEP 2: Early abort on blocked/failed crawl

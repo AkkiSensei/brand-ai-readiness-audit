@@ -986,7 +986,8 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     if not usable_frontier:
         has_blocked = any(
             page_results.get(u) and getattr(page_results[u], "effective_fetch_state", None) in (
-                FetchState.RATE_LIMITED, FetchState.WAF_BLOCKED, FetchState.BLOCKED_BY_ROBOTS, FetchState.HTTP_ERROR
+                FetchState.RATE_LIMITED, FetchState.WAF_BLOCKED, FetchState.BLOCKED_BY_ROBOTS,
+                FetchState.HTTP_ERROR, FetchState.UNUSABLE_CHALLENGE,
             )
             for u in frontier
         )
