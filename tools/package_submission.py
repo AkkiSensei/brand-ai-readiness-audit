@@ -214,7 +214,7 @@ def verify_zip_archive(zip_path: Path) -> bool:
 
 
 def main() -> int:
-    output_zip = REPO_ROOT / "brand-ai-readiness-audit-submission.zip"
+    output_zip = REPO_ROOT / "brand-ai-readiness-audit-final.zip"
     print(f"Packaging submission archive from: {REPO_ROOT}")
     print(f"Destination: {output_zip}")
 
