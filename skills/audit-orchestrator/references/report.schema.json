@@ -397,6 +397,26 @@
           "type": "integer",
           "minimum": 0
         },
+        "checks_available": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checks_attempted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checks_skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checks_blocked": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "findings_produced": {
+          "type": "integer",
+          "minimum": 0
+        },
         "errors": {
           "type": "integer",
           "minimum": 0

@@ -442,13 +442,19 @@ def _validate_skill_coverage(cov: Any, domain: str, errors: list[str]) -> None:
     for key in ("pages_checked", "checks_run", "errors"):
         if key not in cov:
             errors.append(f"{prefix} missing required key: '{key}'")
-        elif not isinstance(cov[key], int):
-            errors.append(f"{prefix}.{key} must be an integer")
+    for int_key in ("checks_available", "checks_attempted", "checks_skipped", "checks_blocked", "findings_produced"):
+        if int_key in cov and not isinstance(cov[int_key], int):
+            errors.append(f"{prefix}.{int_key} must be an integer")
     if "notes" in cov and not isinstance(cov["notes"], str):
         errors.append(f"{prefix}.notes must be a string")
     allowed = {
         "pages_checked",
         "checks_run",
+        "checks_available",
+        "checks_attempted",
+        "checks_skipped",
+        "checks_blocked",
+        "findings_produced",
         "errors",
         "notes",
         "render_confidence",

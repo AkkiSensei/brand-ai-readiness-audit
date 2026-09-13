@@ -49,6 +49,8 @@ from http_client import (
     PlaywrightRenderer,
     PageResult,
     FrontierEntry,
+    FetchState,
+    canonicalize_url,
     extract_text_ratio,
     normalise_url,
     is_same_origin,
@@ -384,6 +386,7 @@ def _discover_frontier(
     sitemap_xml: str = ""
 
     # -- 1. Fetch homepage --
+    canon_target = canonicalize_url(target_url) or target_url
     home = client.get(target_url, deadline=deadline)
     if home.error:
         errors.append(f"Homepage fetch failed: {home.error}")
@@ -393,10 +396,12 @@ def _discover_frontier(
         except Exception as r_exc:
             logger.warning("Renderer failed for %s: %s", target_url, r_exc)
 
-    final_home = home.url or target_url
+    final_home = canonicalize_url(home.url or target_url) or (home.url or target_url)
     page_results[final_home] = home
+    if target_url != final_home:
+        page_results[target_url] = home
     frontier.append(final_home)
-    visited.update({target_url, final_home})
+    visited.update({target_url, canon_target, final_home})
 
     # -- 2. Sitemaps from robots.txt --
     sm_from_robots = client.robots.get_sitemaps(target_url)
@@ -433,13 +438,17 @@ def _discover_frontier(
     # -- 4. Seed BFS queue --
     queue: list[tuple[str, int]] = []
     for u in sm_page_urls:
-        if u not in visited and is_same_origin(u, target_url):
-            queue.append((u, 1))
+        canon_u = canonicalize_url(u) or u
+        if canon_u not in visited and is_same_origin(canon_u, target_url):
+            queue.append((canon_u, 1))
+            visited.add(canon_u)
 
     if home.soup:
         for link in _extract_links(home.soup, final_home):
-            if link not in visited:
-                queue.append((link, 1))
+            canon_link = canonicalize_url(link, base=final_home) or link
+            if canon_link not in visited and is_same_origin(canon_link, target_url):
+                queue.append((canon_link, 1))
+                visited.add(canon_link)
 
     # -- 5. BFS --
     while queue and len(frontier) < max_pages:
@@ -450,8 +459,10 @@ def _discover_frontier(
             errors.append("Crawl frontier truncated: timeout budget reached")
             break
         url, depth = queue.pop(0)
-        if url in visited:
+        canon_url = canonicalize_url(url) or url
+        if canon_url in visited and canon_url != url and canon_url in page_results:
             continue
+        visited.add(canon_url)
         visited.add(url)
         if depth > MAX_DEPTH:
             continue
@@ -467,18 +478,22 @@ def _discover_frontier(
             except Exception as r_exc:
                 logger.warning("Renderer failed for %s: %s", url, r_exc)
 
-        final_url = pr.url or url
+        final_url = canonicalize_url(pr.url or url) or (pr.url or url)
         page_results[final_url] = pr
+        if url != final_url:
+            page_results[url] = pr
         if final_url not in frontier:
             frontier.append(final_url)
         visited.add(final_url)
 
         if pr.soup and depth < MAX_DEPTH:
             for link in _extract_links(pr.soup, final_url):
-                if link not in visited:
+                canon_link = canonicalize_url(link, base=final_url) or link
+                if canon_link not in visited and is_same_origin(canon_link, target_url):
+                    visited.add(canon_link)
                     # BFS queue cap: prevent unbounded memory growth from link-farm pages.
                     if len(queue) < MAX_QUEUE_SIZE:
-                        queue.append((link, depth + 1))
+                        queue.append((canon_link, depth + 1))
                     else:
                         logger.debug(
                             "BFS queue cap (%d) reached; discarding further links from %s.",
@@ -499,15 +514,16 @@ def _check_cr001(target_url: str, client: HttpClient) -> list[dict]:
     try:
         blocked = client.robots.get_disallowed_ai_agents(target_url)
         if blocked:
+            blocked_sorted = sorted(blocked)
+            agents_sample = ", ".join(blocked_sorted[:4])
             findings.append(_finding(
                 "CR-001",
                 "AI crawlers explicitly blocked by robots.txt",
                 "critical",
-                f"{len(blocked)} AI crawler(s) blocked: {', '.join(blocked)}. "
+                f"{len(blocked)} AI crawler(s) blocked: {', '.join(blocked_sorted)}. "
                 f"These bots cannot index site content.",
-                "Review robots.txt and remove or narrow Disallow rules for AI "
-                "crawlers such as GPTBot and Google-Extended to allow AI-driven "
-                "discovery of your brand content.",
+                f"Review robots.txt and remove or narrow Disallow rules for the blocked crawler(s) "
+                f"({agents_sample}) to allow AI-driven discovery of your brand content.",
             ))
     except Exception as exc:
         logger.debug("CR-001 error: %s", exc)
@@ -560,11 +576,13 @@ def _check_cr002(
     findings: list[dict] = []
     try:
         waf_urls: list[str] = []
+        waf_signatures: set[str] = set()
         bad_codes: list[str] = []
         long_redirects: list[str] = []
         for url, pr in page_results.items():
             is_waf, signature = _is_waf_challenge(pr)
             if is_waf:
+                waf_signatures.add(signature)
                 waf_urls.append(f"{url} ({pr.status_code}: {signature})")
             elif pr.status_code is not None and pr.status_code not in (200, 301):
                 # 302/307/308 are standard temporary/permanent redirects and are evaluated via redirect_chain
@@ -590,6 +608,7 @@ def _check_cr002(
         total_pages = len(page_results)
 
         if waf_urls:
+            waf_spec = f" ({', '.join(sorted(waf_signatures)[:2])})" if waf_signatures else ""
             findings.append(_finding(
                 "CR-002",
                 "WAF / anti-bot challenge blocking crawler access",
@@ -597,7 +616,7 @@ def _check_cr002(
                 f"{len(waf_urls)} URL(s) blocked by active WAF or anti-bot challenge: "
                 + "; ".join(sorted(waf_urls)[:5])
                 + ("..." if len(waf_urls) > 5 else ""),
-                "Configure edge WAF and bot-defense rules to permit legitimate AI crawler "
+                f"Configure edge WAF{waf_spec} and bot-defense rules to permit legitimate AI crawler "
                 "user-agents or IPs, or provide dedicated machine-readable sitemaps/APIs.",
                 pages_affected=len(waf_urls),
                 pages_checked=total_pages,
@@ -649,7 +668,7 @@ def _check_cr003_cr004(
         display: dict[str, str] = {}
 
         for url, pr in page_results.items():
-            if pr.soup is None:
+            if not getattr(pr, "is_usable_content", False):
                 continue
 
             # Extract visible text and word count from static HTML
@@ -859,7 +878,7 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
         overlay_urls: list[str] = []
 
         for url, pr in page_results.items():
-            if pr.soup is None:
+            if not getattr(pr, "is_usable_content", False):
                 continue
 
             flagged_for_page = False
@@ -1083,6 +1102,8 @@ def _check_cr008(page_results: dict[str, PageResult]) -> list[dict]:
     try:
         noindex_pages: list[str] = []
         for url, pr in page_results.items():
+            if not getattr(pr, "is_usable_content", False):
+                continue
             # Check X-Robots-Tag header
             xrt = pr.response_headers.get("x-robots-tag", "")
             if "noindex" in xrt.lower():
@@ -1193,15 +1214,17 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
     # 2. Run all checks
     findings: list[dict] = []
     sitemap_timeout = any("timeout budget reached" in str(e).lower() for e in errors)
-    checks = [
-        lambda: _check_cr001(target_url, http_client),
-        lambda: _check_cr002(page_results),
-        lambda: _check_cr003_cr004(page_results, renderer),
-        lambda: _check_cr005(page_results),
-        lambda: _check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots, sitemap_timeout=sitemap_timeout),
-        lambda: _check_cr008(page_results),
+    check_defs = [
+        (lambda: _check_cr001(target_url, http_client), 1),
+        (lambda: _check_cr002(page_results), 1),
+        (lambda: _check_cr003_cr004(page_results, renderer), 2),
+        (lambda: _check_cr005(page_results), 1),
+        (lambda: _check_cr006_cr007(target_url, http_client, sitemap_xml, sm_from_robots, sitemap_timeout=sitemap_timeout), 2),
+        (lambda: _check_cr008(page_results), 1),
     ]
-    for check_fn in checks:
+    checks_available = 8
+    checks_attempted = 0
+    for check_fn, count in check_defs:
         if deadline and deadline.expired():
             errors.append("Crawl checks truncated: timeout budget reached")
             break
@@ -1209,12 +1232,18 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
             errors.append("Crawl checks truncated: timeout budget reached")
             break
         findings.extend(check_fn())
+        checks_attempted += count
+
+    checks_skipped = max(0, checks_available - checks_attempted)
 
     # 3. Proactive recommendations
     proactive = _proactive(page_results, target_url)
 
     payload = {
         "domain": "crawl-render-access",
+        "checks_available": checks_available,
+        "checks_attempted": checks_attempted,
+        "checks_skipped": checks_skipped,
         "pages_analyzed": sum(
             1 for pr in page_results.values()
             if pr.status_code and 200 <= pr.status_code < 400

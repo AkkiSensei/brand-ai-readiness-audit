@@ -517,8 +517,19 @@ class RenderState(str, Enum):
     STATIC_ONLY = "STATIC_ONLY"                  # Browser rendering not requested or static-only crawl
     RENDER_UNAVAILABLE = "RENDER_UNAVAILABLE"    # Playwright or Chromium not available / installed
     RENDER_FAILED = "RENDER_FAILED"              # Browser navigation timed out, crashed, or errored
-    BLOCKED = "BLOCKED"                          # Browser navigation or subrequest blocked by security policy
-    UNKNOWN = "UNKNOWN"                          # Unevaluated or uninspected state
+    BLOCKED = "BLOCKED"                          # Blocked by SSRF or security boundary
+
+
+class FetchState(str, Enum):
+    """Explicit fetch state for a page resource."""
+
+    FETCHED_OK = "fetched_ok"                  # HTTP 200-399 with inspectable response body
+    BLOCKED_BY_ROBOTS = "blocked_by_robots"    # Disallowed by robots.txt
+    RATE_LIMITED = "rate_limited"              # HTTP 429 or rate-limited response
+    WAF_BLOCKED = "waf_blocked"                # Active WAF / bot challenge (403/429/503 with challenge headers/signatures)
+    FETCH_FAILED = "fetch_failed"              # Network drop, timeout, DNS failure, SSL failure, SSRF blocked
+    HTTP_ERROR = "http_error"                  # HTTP 4xx / 5xx error responses (not WAF/rate-limit)
+    REDIRECT_FAILED = "redirect_failed"        # Redirect cycle, too many redirects, or redirect to blocked destination
 
 
 @dataclass
@@ -590,6 +601,50 @@ class PageResult:
 
     evidence_state: Optional[EvidenceState] = None
     """Observation state of evidence for this page resource."""
+
+    fetch_state: Optional[FetchState] = None
+    """Explicit fetch state for this page resource."""
+
+    @property
+    def effective_fetch_state(self) -> FetchState:
+        """Derive or return the explicit FetchState for this page."""
+        if self.fetch_state is not None:
+            return self.fetch_state
+        if not self.robots_allowed:
+            return FetchState.BLOCKED_BY_ROBOTS
+        if self.error:
+            err_lower = self.error.lower()
+            if "redirect" in err_lower:
+                return FetchState.REDIRECT_FAILED
+            if "robots.txt" in err_lower:
+                return FetchState.BLOCKED_BY_ROBOTS
+        if self.status_code is None:
+            return FetchState.FETCH_FAILED
+        if self.status_code == 429:
+            return FetchState.RATE_LIMITED
+        headers_lower = {k.lower(): str(v).lower() for k, v in self.response_headers.items()}
+        html_lower = (self.html or "").lower()
+        if self.status_code in (403, 429, 503, 202):
+            if any(h in headers_lower for h in ("cf-ray", "cf-mitigated", "cf-chl-bypass", "x-datadome")) or \
+               any(k.startswith("akamai-") or k.startswith("x-px-") for k in headers_lower) or \
+               "signalnonbrowseruseragent" in headers_lower.get("x-rate-limit", "") or \
+               any(c in headers_lower.get("set-cookie", "") for c in ("bm_s=", "_abck=", "bm_sz=")) or \
+               "px-captcha" in html_lower or ("access denied" in html_lower and "reference #" in html_lower):
+                return FetchState.WAF_BLOCKED
+            if self.status_code == 403:
+                return FetchState.WAF_BLOCKED
+            if self.status_code == 503 and ("retry-after" in headers_lower or "rate" in html_lower):
+                return FetchState.RATE_LIMITED
+        if 200 <= self.status_code < 400:
+            return FetchState.FETCHED_OK
+        if self.status_code >= 400:
+            return FetchState.HTTP_ERROR
+        return FetchState.FETCH_FAILED
+
+    @property
+    def is_usable_content(self) -> bool:
+        """True if the page was successfully fetched and contains inspectable DOM content."""
+        return self.effective_fetch_state == FetchState.FETCHED_OK and self.soup is not None
 
     @property
     def is_html(self) -> bool:
@@ -1341,6 +1396,7 @@ class HttpClient:
         if eff_deadline and eff_deadline.expired():
             result.error = f"Audit deadline expired before fetching {url}"
             result.robots_allowed = False
+            result.fetch_state = result.effective_fetch_state
             return result
 
         # --- robots.txt check ---
@@ -1354,6 +1410,7 @@ class HttpClient:
                 else:
                     result.error = f"robots.txt disallows fetching ({entry.state.value}): {url}"
                 logger.info("Blocked by robots.txt (%s): %s", entry.state.value, url)
+                result.fetch_state = result.effective_fetch_state
                 return result
 
         fetch_res = _safe_fetch_with_redirects(
@@ -1378,12 +1435,14 @@ class HttpClient:
         if fetch_res.error:
             result.error = fetch_res.error
             if not fetch_res.response:
+                result.fetch_state = result.effective_fetch_state
                 return result
 
         resp = fetch_res.response
         if resp is None:
             if not result.error:
                 result.error = f"No response received for {url}"
+            result.fetch_state = result.effective_fetch_state
             return result
 
         result.status_code = resp.status_code
@@ -1451,6 +1510,7 @@ class HttpClient:
             except Exception:
                 pass
 
+        result.fetch_state = result.effective_fetch_state
         return result
 
     def head(
@@ -1464,6 +1524,7 @@ class HttpClient:
 
         if eff_deadline and eff_deadline.expired():
             result.error = f"Audit deadline expired before HEAD {url}"
+            result.fetch_state = result.effective_fetch_state
             return result
 
         fetch_res = _safe_fetch_with_redirects(
@@ -1487,18 +1548,21 @@ class HttpClient:
         if fetch_res.error:
             result.error = fetch_res.error
             if not fetch_res.response:
+                result.fetch_state = result.effective_fetch_state
                 return result
 
         resp = fetch_res.response
         if resp is None:
             if not result.error:
                 result.error = f"No response received for {url}"
+            result.fetch_state = result.effective_fetch_state
             return result
 
         result.status_code = resp.status_code
         result.response_headers = {k.lower(): v for k, v in resp.headers.items()}
         content_type_full = resp.headers.get("Content-Type", "")
         result.content_type = content_type_full.split(";")[0].strip().lower()
+        result.fetch_state = result.effective_fetch_state
         return result
 
     def close(self) -> None:
@@ -2165,21 +2229,73 @@ def _safe_parse_html(html: str) -> Optional[BeautifulSoup]:
     return None
 
 
-def normalise_url(url: str, base: str) -> Optional[str]:
-    """Resolve a possibly-relative URL against a base URL.
+def canonicalize_url(url: str, base: Optional[str] = None) -> Optional[str]:
+    """Canonicalize a URL to prevent duplicate crawl slots and inconsistent evidence.
 
-    Returns an absolute URL string, or None if the result is unusable.
+    Handles:
+    - Resolving relative URLs against base
+    - Scheme & host case normalization (lowercase)
+    - Default port stripping (:80 for http, :443 for https)
+    - URL fragment removal (#...)
+    - Empty path normalization (https://example.com -> https://example.com/)
+    - Redundant slash normalization (// -> /)
+    - Trailing slash normalization for non-root paths (https://example.com/about/ -> https://example.com/about)
+    - Preserves query parameters without over-normalizing
     """
+    if not url or not isinstance(url, str):
+        return None
+    url = url.strip()
+    if not url:
+        return None
     try:
-        resolved = urllib.parse.urljoin(base, url.strip())
-        parsed = urllib.parse.urlparse(resolved)
-        if parsed.scheme not in ("http", "https"):
+        if base:
+            url = urllib.parse.urljoin(base, url)
+        parsed = urllib.parse.urlparse(url)
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https"):
             return None
-        # Strip fragments
-        clean = urllib.parse.urlunparse(parsed._replace(fragment=""))
-        return clean
+
+        # Normalize hostname and port
+        host = parsed.hostname
+        if not host:
+            return None
+        host = host.lower()
+        port = parsed.port
+        if port and ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+            netloc = host
+        elif port:
+            netloc = f"{host}:{port}"
+        else:
+            netloc = host
+
+        # Normalize path
+        path = parsed.path or ""
+        if not path or path == "":
+            path = "/"
+        else:
+            # Collapse multiple redundant consecutive slashes in path
+            path = re.sub(r"/+", "/", path)
+            # Normalize trailing slash: root remains "/", non-root paths strip trailing slash
+            if path != "/" and path.endswith("/"):
+                path = path.rstrip("/")
+
+        # Construct canonical URL, omitting fragment
+        canonical = urllib.parse.urlunparse((
+            scheme,
+            netloc,
+            path,
+            parsed.params,
+            parsed.query,
+            "",  # Strip fragment
+        ))
+        return canonical
     except Exception:
         return None
+
+
+def normalise_url(url: str, base: str) -> Optional[str]:
+    """Resolve a possibly-relative URL against a base URL and return its canonical form."""
+    return canonicalize_url(url, base=base)
 
 
 def extract_text_ratio(soup: BeautifulSoup) -> float:

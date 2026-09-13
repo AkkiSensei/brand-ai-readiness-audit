@@ -426,10 +426,41 @@ def _check_tc001(
         if not valid_pages:
             return findings
 
-        # Epistemic honesty: only evaluate sameAs when an Organization schema was actually observed.
-        # If no Organization schema was found on the site, do not claim that the Organization schema
-        # is missing sameAs (SF-001 already notes the absence of Organization schema).
+        # When no Organization schema exists, inspect whether official external trust profiles
+        # are linked in raw HTML (footer, social links, header) without structured graph representation.
         if not has_org_block:
+            html_profiles: list[str] = []
+            for url in valid_pages:
+                pr = page_results.get(url)
+                if not pr or not pr.soup:
+                    continue
+                for a in pr.soup.find_all("a", href=True):
+                    href = (a.get("href") or "").strip()
+                    try:
+                        p_href = urllib.parse.urlparse(href)
+                        if p_href.scheme in ("http", "https") and p_href.hostname:
+                            h_host = p_href.hostname.lower()
+                            if any(h_host == ad or h_host.endswith("." + ad) for ad in _AUTHORITATIVE_DOMAINS):
+                                if href not in html_profiles:
+                                    html_profiles.append(href)
+                    except Exception:
+                        continue
+
+            if html_profiles:
+                findings.append(_finding(
+                    "TC-001",
+                    "External entity profiles in page links lack structured sameAs graph linkage",
+                    "medium",
+                    f"[{EvidenceState.CONFIRMED.value}] {len(html_profiles)} authoritative external profile(s) "
+                    f"({', '.join(sorted(html_profiles)[:3])}) were discovered in raw HTML links, but no "
+                    "machine-readable sameAs linkage exists in structured data. AI entity resolution engines "
+                    "must rely on scraping heuristics rather than direct knowledge graph corroboration.",
+                    "Publish an Organization schema with a sameAs array declaring your official profiles "
+                    f"({', '.join(sorted(html_profiles)[:3])}) so AI search models can corroborate your canonical entity identity.",
+                    related=["SF-001"],
+                    pages_affected=len(valid_pages),
+                    pages_checked=len(valid_pages),
+                ))
             return findings
 
         if not has_any_sameas:
@@ -924,6 +955,29 @@ def _check_tc004_tc006(
         if not valid_pages:
             return findings
 
+        # Fallback to HTML meta/title for brand entity when no Organization JSON-LD is declared
+        if not brand_names:
+            for url in valid_pages[:3]:
+                pr = page_results.get(url)
+                if not pr or not pr.soup:
+                    continue
+                og_site = pr.soup.find("meta", attrs={"property": "og:site_name"}) or \
+                          pr.soup.find("meta", attrs={"name": "og:site_name"})
+                if og_site and og_site.get("content"):
+                    brand_names.append(og_site["content"].strip())
+                    break
+                app_name = pr.soup.find("meta", attrs={"name": "application-name"})
+                if app_name and app_name.get("content"):
+                    brand_names.append(app_name["content"].strip())
+                    break
+                title_tag = pr.soup.find("title")
+                if title_tag and title_tag.get_text(strip=True):
+                    t_text = title_tag.get_text(strip=True)
+                    candidate = re.split(r"[-|•—]", t_text)[0].strip()
+                    if 2 <= len(candidate) <= 50:
+                        brand_names.append(candidate)
+                        break
+
         # TC-004: Brand entity ambiguity detection via structural evidence
         if brand_names:
             primary_name = brand_names[0].strip()
@@ -935,22 +989,63 @@ def _check_tc004_tc006(
             )
 
             if not has_disambig:
-                findings.append(_finding(
-                    "TC-004",
-                    "Brand name is ambiguous without disambiguation",
-                    "critical",
-                    f"Brand entity '{primary_name}' lacks unique knowledge "
-                    "graph linkage (Wikidata/Wikipedia sameAs) and provides "
-                    "no structural disambiguation (legalName, disambiguatingDescription, "
-                    "address, foundingDate, or description). AI engines cannot "
-                    "disambiguate this brand from potential entity collisions.",
-                    "Add disambiguating properties to your Organization schema: "
-                    "connect to a Wikidata entity in sameAs, specify legalName, "
-                    "address, foundingDate, and a detailed description.",
-                    related=["TC-006", "TC-001"],
-                    pages_affected=len(valid_pages),
-                    pages_checked=len(valid_pages),
-                ))
+                if not org_blocks:
+                    # Distinguish missing structured data (governed by SF-001) from actual entity ambiguity.
+                    # Inspect whether HTML markup or footer provides corroborating entity context
+                    # (e.g. physical address, phone, or authoritative external profile links).
+                    has_html_grounding = False
+                    for url in valid_pages:
+                        pr = page_results.get(url)
+                        if not pr or not pr.soup:
+                            continue
+                        text = pr.soup.get_text(separator=" ", strip=True)
+                        if any(pat.search(text) for pat in (_ADDR_STREET_FIRST, _ADDR_EU, _ADDR_UK_POSTCODE)):
+                            has_html_grounding = True
+                            break
+                        for a in pr.soup.find_all("a", href=True):
+                            href = (a.get("href") or "").strip().lower()
+                            if any(ad in href for ad in ("linkedin.com", "wikipedia.org", "wikidata.org", "crunchbase.com")):
+                                has_html_grounding = True
+                                break
+                        if has_html_grounding:
+                            break
+
+                    # Only flag TC-004 when there is actual entity ambiguity:
+                    # generic / short brand name, or zero HTML grounding across pages.
+                    is_generic_or_short = len(primary_name) <= 4 or primary_name.lower() in {
+                        "home", "welcome", "about", "contact", "official", "store", "shop", "app", "blog", "brand"
+                    }
+                    if is_generic_or_short or not has_html_grounding:
+                        findings.append(_finding(
+                            "TC-004",
+                            "Brand entity name is ambiguous without corroborating grounding",
+                            "high",
+                            f"[{EvidenceState.CONFIRMED.value}] Brand entity '{primary_name}' identified from page markup "
+                            "lacks machine-readable knowledge graph linkage and lacks corroborating physical contact or external "
+                            "profile evidence in page content. AI engines cannot disambiguate this brand from external entity collisions.",
+                            f"Establish unambiguous brand authority for '{primary_name}' by linking official entity profiles "
+                            "(Wikidata, Wikipedia, LinkedIn) and publishing contact or Organization schema.",
+                            related=["TC-001", "SF-001"],
+                            pages_affected=len(valid_pages),
+                            pages_checked=len(valid_pages),
+                        ))
+                else:
+                    findings.append(_finding(
+                        "TC-004",
+                        "Brand name is ambiguous without disambiguation",
+                        "critical",
+                        f"Brand entity '{primary_name}' lacks unique knowledge "
+                        "graph linkage (Wikidata/Wikipedia sameAs) and provides "
+                        "no structural disambiguation (legalName, disambiguatingDescription, "
+                        "address, foundingDate, or description). AI engines cannot "
+                        "disambiguate this brand from potential entity collisions.",
+                        "Add disambiguating properties to your Organization schema: "
+                        "connect to a Wikidata entity in sameAs, specify legalName, "
+                        "address, foundingDate, and a detailed description.",
+                        related=["TC-006", "TC-001"],
+                        pages_affected=len(valid_pages),
+                        pages_checked=len(valid_pages),
+                    ))
 
         # TC-004: Capitalisation variants (only evaluate casing differences of identical brand string)
         if len(brand_names) >= 2:
@@ -1136,25 +1231,45 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
 
+    # Guard against 403/429/WAF/error crawl failure cascades:
+    # Only analyze pages with successfully fetched, usable DOM content
+    usable_frontier = [
+        u for u in frontier
+        if page_results.get(u) and getattr(page_results[u], "is_usable_content", False)
+    ]
+
+    checks_available = 6
+    if not usable_frontier:
+        return {
+            "domain": "trust-entity-corroboration",
+            "checks_available": checks_available,
+            "checks_attempted": 0,
+            "checks_skipped": checks_available,
+            "pages_analyzed": 0,
+            "pages_discovered": len(frontier),
+            "errors": ["Skipped: no usable HTML pages fetched (pages rate-limited, WAF-blocked, or errored)."],
+            "findings": [],
+            "proactive_candidates": [],
+        }
+
     errors: list[str] = []
     findings: list[dict] = []
 
-    findings.extend(_check_tc001(frontier, page_results, http_client))
-    findings.extend(_check_tc002(frontier, page_results))
-    findings.extend(_check_tc003(frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s, deadline=deadline))
-    findings.extend(_check_tc005(frontier, page_results))
-    findings.extend(_check_tc004_tc006(frontier, page_results))
-    findings.extend(_check_rendered_trust_signals(frontier, page_results))
+    findings.extend(_check_tc001(usable_frontier, page_results, http_client))
+    findings.extend(_check_tc002(usable_frontier, page_results))
+    findings.extend(_check_tc003(usable_frontier, page_results, http_client, t_start=t_start, timeout_s=timeout_s, deadline=deadline))
+    findings.extend(_check_tc005(usable_frontier, page_results))
+    findings.extend(_check_tc004_tc006(usable_frontier, page_results))
+    findings.extend(_check_rendered_trust_signals(usable_frontier, page_results))
 
-    proactive = _proactive(frontier, page_results)
+    proactive = _proactive(usable_frontier, page_results)
 
     return {
         "domain": "trust-entity-corroboration",
-        "pages_analyzed": sum(
-            1 for u in frontier if u in page_results and
-            page_results[u].status_code and
-            200 <= page_results[u].status_code < 400
-        ),
+        "checks_available": checks_available,
+        "checks_attempted": checks_available,
+        "checks_skipped": 0,
+        "pages_analyzed": len(usable_frontier),
         "pages_discovered": len(frontier),
         "errors": errors,
         "findings": findings,

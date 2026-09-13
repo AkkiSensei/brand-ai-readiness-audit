@@ -975,27 +975,47 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
 
+    # Guard against 403/429/WAF/error crawl failure cascades:
+    # Only analyze pages with successfully fetched, usable DOM content
+    usable_frontier = [
+        u for u in frontier
+        if page_results.get(u) and getattr(page_results[u], "is_usable_content", False)
+    ]
+
+    checks_available = 8
+    if not usable_frontier:
+        return {
+            "domain": "structured-fact-extraction",
+            "checks_available": checks_available,
+            "checks_attempted": 0,
+            "checks_skipped": checks_available,
+            "pages_analyzed": 0,
+            "pages_discovered": len(frontier),
+            "errors": ["Skipped: no usable HTML pages fetched (pages rate-limited, WAF-blocked, or errored)."],
+            "findings": [],
+            "proactive_candidates": [],
+        }
+
     errors: list[str] = []
     findings: list[dict] = []
 
-    sf01_02, sf_errors = _check_sf001_sf002(frontier, page_results)
+    sf01_02, sf_errors = _check_sf001_sf002(usable_frontier, page_results)
     findings.extend(sf01_02)
     errors.extend(sf_errors)
-    findings.extend(_check_sf003_sf004(frontier, page_results))
-    findings.extend(_check_sf005(frontier, page_results, http_client))
-    findings.extend(_check_sf006(frontier, page_results))
-    findings.extend(_check_sf007_sf008(frontier, page_results))
-    findings.extend(_check_rendered_jsonld(frontier, page_results))
+    findings.extend(_check_sf003_sf004(usable_frontier, page_results))
+    findings.extend(_check_sf005(usable_frontier, page_results, http_client))
+    findings.extend(_check_sf006(usable_frontier, page_results))
+    findings.extend(_check_sf007_sf008(usable_frontier, page_results))
+    findings.extend(_check_rendered_jsonld(usable_frontier, page_results))
 
-    proactive = _proactive(frontier, page_results)
+    proactive = _proactive(usable_frontier, page_results)
 
     return {
         "domain": "structured-fact-extraction",
-        "pages_analyzed": sum(
-            1 for u in frontier if u in page_results and
-            page_results[u].status_code and
-            200 <= page_results[u].status_code < 400
-        ),
+        "checks_available": checks_available,
+        "checks_attempted": checks_available,
+        "checks_skipped": 0,
+        "pages_analyzed": len(usable_frontier),
         "pages_discovered": len(frontier),
         "errors": errors,
         "findings": findings,

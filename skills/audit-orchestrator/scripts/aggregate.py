@@ -53,7 +53,15 @@ for p in (_HTTP_SCRIPTS, _SFE_SCRIPTS, _TEC_SCRIPTS, _ER_SCRIPTS, _ORCH_SCRIPTS)
     if sp not in sys.path:
         sys.path.insert(0, sp)
 
-from http_client import AuditDeadline, HttpClient, PageResult, PlaywrightRenderer, is_ssrf_disallowed, CoverageState  # type: ignore[import]
+from http_client import (  # type: ignore[import]
+    AuditDeadline,
+    HttpClient,
+    PageResult,
+    PlaywrightRenderer,
+    is_ssrf_disallowed,
+    CoverageState,
+    canonicalize_url,
+)
 import crawl_audit  # type: ignore[import]
 import sfe_audit  # type: ignore[import]
 import tec_audit  # type: ignore[import]
@@ -63,6 +71,13 @@ from proactive_engine import inject_proactive_recommendations  # type: ignore[im
 from schema_validate import validate_report  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
+
+DOMAIN_CHECKS_AVAILABLE = {
+    "crawl-render-access": 8,           # CR-001 -> CR-008
+    "structured-fact-extraction": 8,    # SF-001 -> SF-008
+    "trust-entity-corroboration": 6,    # TC-001 -> TC-006
+    "engagement-retention": 8,          # ER-001 -> ER-008
+}
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -94,7 +109,7 @@ _FINDING_REMEDIATION_METADATA: dict[str, dict[str, str]] = {
         "asset_type": "robots.txt",
         "location": "/robots.txt at domain root",
         "why_it_matters": "AI search engines (ChatGPT, Claude, Perplexity, Gemini) obey robots.txt; blocking their user-agents completely eliminates your site from real-time AI knowledge retrieval and citation.",
-        "default_action": "Update /robots.txt to permit major AI crawler user-agents (GPTBot, Claude-Web, PerplexityBot, Google-Extended, Applebot-Extended) to access indexable public pages.",
+        "default_action": "Update /robots.txt to permit blocked AI crawler user-agents to access indexable public pages.",
     },
     "CR-002": {
         "theme": "Crawler Access Governance",
@@ -365,8 +380,44 @@ def _resolve_finding_metadata(lid: str, title: str, raw: dict) -> dict[str, str]
     CR-007, SF-004, SF-008, TC-002, TC-004, ER-001, ER-003, ER-004)."""
     base = dict(_FINDING_REMEDIATION_METADATA.get(lid, {}))
     t_lower = (title or "").lower()
+    ev = raw.get("evidence")
 
-    if lid == "CR-002":
+    if lid == "CR-001":
+        blocked_agents = []
+        if isinstance(ev, dict):
+            sample = ev.get("blocked_sample") or ev.get("agents_sample") or []
+            if isinstance(sample, list):
+                for item in sample:
+                    if isinstance(item, dict) and "agent" in item:
+                        blocked_agents.append(item["agent"])
+                    elif isinstance(item, str):
+                        blocked_agents.append(item)
+            elif isinstance(sample, str):
+                blocked_agents.append(sample)
+        elif isinstance(ev, str):
+            for crawler in ["Bytespider", "GPTBot", "Claude-Web", "PerplexityBot", "Google-Extended", "Applebot-Extended", "CCBot", "cohere-ai"]:
+                if crawler.lower() in ev.lower():
+                    blocked_agents.append(crawler)
+        if blocked_agents:
+            agents_str = ", ".join(dict.fromkeys(blocked_agents))
+            base["default_action"] = (
+                f"Update /robots.txt to permit {agents_str}: remove 'Disallow: /' "
+                f"or add targeted 'Allow: /' directives for these specific crawlers."
+            )
+        else:
+            base["default_action"] = (
+                "Update /robots.txt to permit blocked AI crawler user-agents to access indexable public pages."
+            )
+
+    elif lid == "CR-002":
+        waf_name = None
+        if isinstance(ev, dict):
+            waf_name = ev.get("waf") or ev.get("signature") or ev.get("provider")
+        elif isinstance(ev, str):
+            for prov in ["Cloudflare", "AWS WAF", "Akamai", "DataDome", "Imperva", "Incapsula", "Fastly"]:
+                if prov.lower() in ev.lower():
+                    waf_name = prov
+                    break
         if "non-ok" in t_lower or "status" in t_lower:
             base["theme"] = "Crawl Budget & Link Health"
             base["asset_type"] = "Web Server / HTTP Route"
@@ -379,6 +430,11 @@ def _resolve_finding_metadata(lid: str, title: str, raw: dict) -> dict[str, str]
             base["location"] = "Edge CDN / Web Server redirect rules"
             base["why_it_matters"] = "Redirect chains exceeding 2 hops increase latency, exhaust crawler fetch budgets, and risk crawler abandonment before the final destination page is reached."
             base["default_action"] = "Shorten redirect chains to direct 1-hop 301 redirects pointing directly to the final canonical destination URL."
+        elif waf_name:
+            base["default_action"] = (
+                f"Configure {waf_name} edge rules to exempt verified AI crawler user-agents "
+                f"and IP ranges from interactive JavaScript/CAPTCHA challenges."
+            )
 
     elif lid == "CR-005":
         if "geolocation" in t_lower or "location-selection" in t_lower or "pincode" in t_lower:
@@ -431,6 +487,18 @@ def _resolve_finding_metadata(lid: str, title: str, raw: dict) -> dict[str, str]
             base["why_it_matters"] = "Duplicate meta descriptions across distinct URLs hinder AI search engines and summarizers from generating accurate snippet previews for citation."
             base["default_action"] = "Write unique, content-specific meta descriptions for each indexable page."
 
+    elif lid == "TC-001":
+        profiles = []
+        if isinstance(ev, dict):
+            prof_raw = ev.get("profiles_found") or ev.get("unlinked_profiles") or ev.get("external_profiles") or []
+            if isinstance(prof_raw, list):
+                profiles = [str(p) for p in prof_raw if p]
+        if profiles:
+            prof_str = ", ".join(profiles[:3])
+            base["default_action"] = (
+                f"Add sameAs links to Organization JSON-LD pointing to your official entity profiles: {prof_str}."
+            )
+
     elif lid == "TC-002":
         if "phone" in t_lower:
             base["asset_type"] = "Phone Number / contactPoint Schema"
@@ -449,7 +517,19 @@ def _resolve_finding_metadata(lid: str, title: str, raw: dict) -> dict[str, str]
             base["default_action"] = "Standardize brand name spelling across all pages and JSON-LD structured data."
 
     elif lid == "TC-004":
-        if "capitalisation" in t_lower or "spelling" in t_lower or "variant" in t_lower:
+        if "grounding" in t_lower or "identity" in t_lower or "linkage" in t_lower or "ambiguity" in t_lower:
+            brand = None
+            if isinstance(ev, dict):
+                brand = ev.get("brand_name") or ev.get("brand")
+            if brand and brand != "Brand":
+                base["default_action"] = (
+                    f"Ground brand '{brand}' by establishing official Wikidata, Wikipedia, or Crunchbase presence and linking via sameAs in Organization schema."
+                )
+            else:
+                base["default_action"] = (
+                    "Ground the brand entity by establishing official Wikidata, Wikipedia, or Crunchbase presence and linking via sameAs in Organization schema."
+                )
+        elif "capitalisation" in t_lower or "spelling" in t_lower or "variant" in t_lower:
             base["theme"] = "External Entity Corroboration"
             base["asset_type"] = "Brand Name Styling"
             base["location"] = "Page headings, text content, and metadata"
@@ -525,6 +605,8 @@ def _normalise_finding(raw: Any, domain_name: str, target_url: str) -> dict:
     elif isinstance(raw_evidence, dict):
         if "url" not in raw_evidence:
             raw_evidence["url"] = target_url
+        if "url" in raw_evidence and isinstance(raw_evidence["url"], str):
+            raw_evidence["url"] = canonicalize_url(raw_evidence["url"]) or raw_evidence["url"]
         evidence = raw_evidence
     else:
         evidence = str(raw_evidence)
@@ -537,6 +619,8 @@ def _normalise_finding(raw: Any, domain_name: str, target_url: str) -> dict:
 
     why_it_matters = raw.get("why_it_matters") or meta.get("why_it_matters") or "Impacts AI discovery and fact extraction."
     location = raw.get("location") or meta.get("location") or "Audited page content"
+    if isinstance(location, str) and (location.startswith("http://") or location.startswith("https://")):
+        location = canonicalize_url(location) or location
     remediation_theme = raw.get("remediation_theme") or meta.get("theme") or "General AI Readiness"
     asset_type = raw.get("asset_type") or meta.get("asset_type") or "Web asset"
 
@@ -802,10 +886,16 @@ def _build_coverage(
         ("engagement-retention", "engagement_retention"),
     ]:
         result = domain_results.get(domain_key)
+        avail = DOMAIN_CHECKS_AVAILABLE.get(domain_key, 8)
         if result is None:
             coverage[schema_key] = {
                 "pages_checked": 0,
                 "checks_run": 0,
+                "checks_available": avail,
+                "checks_attempted": 0,
+                "checks_skipped": avail,
+                "checks_blocked": 0,
+                "findings_produced": 0,
                 "errors": 1,
                 "notes": "Domain audit was skipped or failed.",
                 "render_confidence": "high",
@@ -817,9 +907,17 @@ def _build_coverage(
             limitations.append(f"{domain_label} failed to execute (UNAVAILABLE).")
         elif schema_key == "crawl_render_access":
             errors_list = result.get("errors", [])
+            attempted = result.get("checks_attempted", avail)
+            skipped = result.get("checks_skipped", max(0, avail - attempted))
+            findings_count = len(result.get("findings", []))
             cov_entry: dict[str, Any] = {
                 "pages_checked": pages_audited,
-                "checks_run": len(result.get("findings", [])),
+                "checks_run": attempted,
+                "checks_available": avail,
+                "checks_attempted": attempted,
+                "checks_skipped": skipped,
+                "checks_blocked": 0,
+                "findings_produced": findings_count,
                 "errors": len(errors_list),
                 "render_confidence": "low" if low_conf_count > 0 else "high",
                 "pages_with_low_render_confidence": low_conf_count,
@@ -838,6 +936,9 @@ def _build_coverage(
             pages_checked = result.get("pages_analyzed", 0)
             errors_list = result.get("errors", [])
             domain_low_conf = min(low_conf_count, pages_checked) if pages_checked > 0 else 0
+            attempted = result.get("checks_attempted", avail if pages_checked > 0 else 0)
+            skipped = result.get("checks_skipped", max(0, avail - attempted))
+            findings_count = len(result.get("findings", []))
 
             # Determine domain coverage state
             domain_label = schema_key.replace("_", " ")
@@ -866,7 +967,12 @@ def _build_coverage(
 
             cov_entry = {
                 "pages_checked": pages_checked,
-                "checks_run": len(result.get("findings", [])),
+                "checks_run": attempted,
+                "checks_available": avail,
+                "checks_attempted": attempted,
+                "checks_skipped": skipped,
+                "checks_blocked": 0,
+                "findings_produced": findings_count,
                 "errors": len(errors_list),
                 "render_confidence": "low" if domain_low_conf > 0 else "high",
                 "pages_with_low_render_confidence": domain_low_conf,
@@ -1081,6 +1187,11 @@ def _build_aborted_report(
             "crawl_render_access": {
                 "pages_checked": 0,
                 "checks_run": 1 if norm_findings else 0,
+                "checks_available": 8,
+                "checks_attempted": 1 if norm_findings else 0,
+                "checks_skipped": 7 if norm_findings else 8,
+                "checks_blocked": 0,
+                "findings_produced": len(norm_findings),
                 "errors": 1,
                 "notes": message,
                 "render_confidence": "high",
@@ -1090,6 +1201,11 @@ def _build_aborted_report(
             "structured_fact_extraction": {
                 "pages_checked": 0,
                 "checks_run": 0,
+                "checks_available": 8,
+                "checks_attempted": 0,
+                "checks_skipped": 8,
+                "checks_blocked": 0,
+                "findings_produced": 0,
                 "errors": 0,
                 "notes": "Skipped: audit aborted",
                 "render_confidence": "high",
@@ -1099,6 +1215,11 @@ def _build_aborted_report(
             "trust_entity_corroboration": {
                 "pages_checked": 0,
                 "checks_run": 0,
+                "checks_available": 6,
+                "checks_attempted": 0,
+                "checks_skipped": 6,
+                "checks_blocked": 0,
+                "findings_produced": 0,
                 "errors": 0,
                 "notes": "Skipped: audit aborted",
                 "render_confidence": "high",
@@ -1108,6 +1229,11 @@ def _build_aborted_report(
             "engagement_retention": {
                 "pages_checked": 0,
                 "checks_run": 0,
+                "checks_available": 8,
+                "checks_attempted": 0,
+                "checks_skipped": 8,
+                "checks_blocked": 0,
+                "findings_produced": 0,
                 "errors": 0,
                 "notes": "Skipped: audit aborted",
                 "render_confidence": "high",
@@ -1390,6 +1516,11 @@ def _run_pipeline(
     # STEP 3: Site-wide block short-circuit
     # ==============================================================
     site_blocked = _is_site_wide_block(crawl_result)
+    usable_pages = [
+        u for u in frontier
+        if page_results.get(u) and getattr(page_results[u], "is_usable_content", False)
+    ]
+    no_usable_pages = len(usable_pages) == 0 and len(frontier) > 0
 
     # ==============================================================
     # STEP 4: Downstream domain audits
@@ -1406,7 +1537,26 @@ def _run_pipeline(
                 "domain": domain_name,
                 "pages_analyzed": 0,
                 "pages_discovered": 0,
+                "checks_available": DOMAIN_CHECKS_AVAILABLE.get(domain_name, 8),
+                "checks_attempted": 0,
+                "checks_skipped": DOMAIN_CHECKS_AVAILABLE.get(domain_name, 8),
                 "errors": ["Skipped: site-wide AI-crawler block detected."],
+                "findings": [],
+                "proactive_candidates": [],
+            }
+            continue
+
+        if no_usable_pages:
+            domain_results[domain_name] = {
+                "domain": domain_name,
+                "pages_analyzed": 0,
+                "pages_discovered": len(frontier),
+                "checks_available": DOMAIN_CHECKS_AVAILABLE.get(domain_name, 8),
+                "checks_attempted": 0,
+                "checks_skipped": DOMAIN_CHECKS_AVAILABLE.get(domain_name, 8),
+                "errors": [
+                    "Skipped: no usable HTML content fetched (all crawl attempts encountered rate limits, WAF blocks, or HTTP errors)."
+                ],
                 "findings": [],
                 "proactive_candidates": [],
             }

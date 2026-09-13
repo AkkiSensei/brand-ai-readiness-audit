@@ -13,8 +13,8 @@
     "frontier_size": 3,
     "huge_sitemap_bounded": "PASS",
     "sitemap_urls_parsed": 500,
-    "peak_memory_mb": 41.07,
-    "stress_duration_seconds": 2.9
+    "peak_memory_mb": 41.1,
+    "stress_duration_seconds": 1.67
   },
   "partial_failure": {
     "http_error_schema_valid": "PASS",
@@ -26,7 +26,7 @@
   },
   "determinism": {
     "repeatability_5_runs": "PASS",
-    "finding_count": 10,
+    "finding_count": 8,
     "finding_ids": [
       "F-001",
       "F-002",
@@ -35,15 +35,13 @@
       "F-005",
       "F-006",
       "F-007",
-      "F-008",
-      "F-009",
-      "F-010"
+      "F-008"
     ],
     "summary_counts": {
-      "total_findings": 10,
+      "total_findings": 8,
       "critical": 0,
       "high": 3,
-      "medium": 5,
+      "medium": 3,
       "low": 0,
       "info": 2,
       "coverage": {
@@ -55,7 +53,7 @@
   },
   "runtime_budget": {
     "minimal_site": {
-      "wall_clock_seconds": 0.405,
+      "wall_clock_seconds": 1.066,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 9,
@@ -63,23 +61,23 @@
       "within_5min_budget": true
     },
     "typical_site": {
-      "wall_clock_seconds": 0.435,
-      "audit_status": "completed",
-      "pages_audited": 1,
-      "total_findings": 12,
-      "schema_valid": true,
-      "within_5min_budget": true
-    },
-    "js_heavy_site": {
-      "wall_clock_seconds": 5.308,
+      "wall_clock_seconds": 1.064,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 8,
       "schema_valid": true,
       "within_5min_budget": true
     },
+    "js_heavy_site": {
+      "wall_clock_seconds": 5.648,
+      "audit_status": "completed",
+      "pages_audited": 1,
+      "total_findings": 9,
+      "schema_valid": true,
+      "within_5min_budget": true
+    },
     "adversarial_slow_site": {
-      "wall_clock_seconds": 8.024,
+      "wall_clock_seconds": 8.02,
       "audit_status": "blocked",
       "pages_audited": 0,
       "total_findings": 0,
@@ -87,10 +85,10 @@
       "within_5min_budget": true
     },
     "multipage_crawl": {
-      "wall_clock_seconds": 4.436,
+      "wall_clock_seconds": 5.28,
       "audit_status": "completed",
       "pages_audited": 1,
-      "total_findings": 13,
+      "total_findings": 9,
       "schema_valid": true,
       "within_5min_budget": true
     }

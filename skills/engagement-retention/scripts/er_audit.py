@@ -1038,27 +1038,47 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
             except Exception as exc:
                 page_results[url] = PageResult(url=url, error=str(exc))
 
+    # Guard against 403/429/WAF/error crawl failure cascades:
+    # Only analyze pages with successfully fetched, usable DOM content
+    usable_frontier = [
+        u for u in frontier
+        if page_results.get(u) and getattr(page_results[u], "is_usable_content", False)
+    ]
+
+    checks_available = 8
+    if not usable_frontier:
+        return {
+            "domain": "engagement-retention",
+            "checks_available": checks_available,
+            "checks_attempted": 0,
+            "checks_skipped": checks_available,
+            "pages_analyzed": 0,
+            "pages_discovered": len(frontier),
+            "errors": ["Skipped: no usable HTML pages fetched (pages rate-limited, WAF-blocked, or errored)."],
+            "findings": [],
+            "proactive_candidates": [],
+        }
+
     errors: list[str] = []
     findings: list[dict] = []
 
-    findings.extend(_check_er001(frontier, page_results))
-    findings.extend(_check_er002(frontier, page_results, target_url))
-    findings.extend(_check_er003(frontier, page_results))
-    findings.extend(_check_er004(frontier, page_results, http_client, target_url, t_start=t_start, timeout_s=timeout_s, deadline=deadline))
-    findings.extend(_check_er005(frontier, page_results))
-    findings.extend(_check_er006_er007(frontier, page_results))
-    findings.extend(_check_er008(frontier, page_results))
-    findings.extend(_check_rendered_engagement(frontier, page_results))
+    findings.extend(_check_er001(usable_frontier, page_results))
+    findings.extend(_check_er002(usable_frontier, page_results, target_url))
+    findings.extend(_check_er003(usable_frontier, page_results))
+    findings.extend(_check_er004(usable_frontier, page_results, http_client, target_url, t_start=t_start, timeout_s=timeout_s, deadline=deadline))
+    findings.extend(_check_er005(usable_frontier, page_results))
+    findings.extend(_check_er006_er007(usable_frontier, page_results))
+    findings.extend(_check_er008(usable_frontier, page_results))
+    findings.extend(_check_rendered_engagement(usable_frontier, page_results))
 
-    proactive = _proactive(frontier, page_results)
+    proactive = _proactive(usable_frontier, page_results)
 
     return {
         "domain": "engagement-retention",
-        "pages_analyzed": sum(
-            1 for u in frontier if u in page_results and
-            page_results[u].status_code and
-            200 <= page_results[u].status_code < 400
-        ),
+        "checks_available": checks_available,
+        "checks_attempted": checks_available,
+        "checks_skipped": 0,
+        "pages_analyzed": len(usable_frontier),
         "pages_discovered": len(frontier),
         "errors": errors,
         "findings": findings,

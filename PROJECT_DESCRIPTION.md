@@ -30,7 +30,7 @@ The system is a **five-skill marketplace** adhering to the `agentskills.io` stan
 
 - **30 defect heuristics** across crawlability, structured data, entity trust, and engagement/retention.
 - **7 proactive AI-readiness recommendations**.
-- **299 automated regression tests** covering archetypes, adversarial hardening, security, chaos, determinism, generalization, and schema compliance.
+- **314 automated regression tests** covering archetypes, adversarial hardening, security, chaos, determinism, generalization, live-generalization cascade prevention, and schema compliance.
 - **11 synthetic website archetypes** validated: SPA, e-commerce, legacy HTML, editorial blog, paywalled content, hydration-dependent DOM, cookie/privacy overlay, i18n, WAF-challenged, geo-gated, and malformed non-HTML.
 - **4 chaos scenarios**: zero-byte HTML, garbage DOM/JSON-LD, infinite redirect loops, TCP socket blackhole.
 
