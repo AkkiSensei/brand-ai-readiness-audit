@@ -5,7 +5,7 @@ description: >
   Entrypoint skill that coordinates end-to-end AI-readiness audits for brand
   websites. Delegates crawl, structured-data, entity, and engagement checks to
   four domain sub-skills; deduplicates findings; injects proactive
-  recommendations (PA-001..PA-006);
+  recommendations (PA-001..PA-006, PA-CANONICAL);
   validates the final report against report.schema.json.
 entrypoint: true
 tags:
@@ -101,13 +101,14 @@ Assign sequential IDs: F-001, F-002, ..., F-NNN
 Resolve related_to cross-references to final IDs
     |
     v
-Proactive recommendations (PA-001..PA-006)
+Proactive recommendations (PA-001..PA-006, PA-CANONICAL)
   PA-001: llms.txt / llms-full.txt availability
   PA-002: Unified JSON-LD @graph with @id cross-references
   PA-003: Heading fragment IDs for deep linking
   PA-004: Answer-first / inverted pyramid content structure
   PA-005: RSS / Atom feed availability
   PA-006: Explicit AI crawler Allow: in robots.txt
+  PA-CANONICAL: Self-referential canonical tags for unambiguous AI indexation
     |
     v
 Re-deduplicate + re-sort + re-assign IDs (F-001..F-NNN)
@@ -142,7 +143,7 @@ A JSON document conforming to `references/report.schema.json` containing:
 | File                     | Purpose                                                  |
 |--------------------------|----------------------------------------------------------|
 | `scripts/aggregate.py`   | Main orchestrator and CLI entrypoint.                    |
-| `scripts/proactive_engine.py` | PA-001..PA-006 proactive recommendation generator.  |
+| `scripts/proactive_engine.py` | PA-001..PA-006 & PA-CANONICAL proactive recommendation generator.  |
 | `scripts/schema_validate.py`  | Report schema validation (jsonschema + fallback).   |
 
 ## References

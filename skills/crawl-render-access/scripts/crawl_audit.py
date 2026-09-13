@@ -56,9 +56,19 @@ from http_client import (
     is_same_origin,
     is_auth_or_utility_url,
     EvidenceState,
+    KNOWN_AI_CRAWLERS,
 )
 
 logger = logging.getLogger(__name__)
+
+# Major AI search and LLM inference crawlers with primary brand citation impact
+MAJOR_AI_AGENTS: set[str] = {
+    "GPTBot",
+    "Claude-Web",
+    "PerplexityBot",
+    "Google-Extended",
+    "Applebot-Extended",
+}
 
 # ---------------------------------------------------------------------------
 # Centralised thresholds
@@ -121,6 +131,7 @@ def _finding(
     related: list[str] | None = None,
     pages_affected: int | None = None,
     pages_checked: int | None = None,
+    **kwargs: Any,
 ) -> dict:
     """Return a finding dict conforming to the shared domain contract."""
     d = {
@@ -136,6 +147,7 @@ def _finding(
         d["pages_affected"] = pages_affected
     if pages_checked is not None:
         d["pages_checked"] = pages_checked
+    d.update(kwargs)
     return d
 
 
@@ -509,21 +521,59 @@ def _discover_frontier(
 # ===================================================================
 
 def _check_cr001(target_url: str, client: HttpClient) -> list[dict]:
-    """CR-001 (critical): AI crawler blocked in robots.txt."""
+    """CR-001: AI crawler blocked in robots.txt.
+
+    Severity reflects impact and breadth:
+    - critical: >= 3 major AI search crawlers blocked OR >= 50% of known AI crawlers blocked
+    - high: 1-2 major AI search crawlers blocked OR >= 3 secondary crawlers blocked
+    - medium: >= 2 secondary AI crawlers blocked (with no major crawlers blocked)
+    - low: single secondary crawler blocked (with all major search crawlers allowed)
+    """
     findings: list[dict] = []
     try:
         blocked = client.robots.get_disallowed_ai_agents(target_url)
         if blocked:
             blocked_sorted = sorted(blocked)
+            blocked_set = set(blocked_sorted)
+            blocked_major = sorted(blocked_set & MAJOR_AI_AGENTS)
+            allowed_major = sorted(MAJOR_AI_AGENTS - blocked_set)
+            blocked_secondary = sorted(blocked_set - MAJOR_AI_AGENTS)
+
+            total_known = len(KNOWN_AI_CRAWLERS) if KNOWN_AI_CRAWLERS else 14
+            if len(blocked_major) >= 3 or len(blocked_set) >= (total_known / 2):
+                severity = "critical"
+                title = "Major AI search crawlers blocked in robots.txt"
+            elif len(blocked_major) >= 1 or len(blocked_secondary) >= 3:
+                severity = "high"
+                title = "AI search crawlers restricted in robots.txt"
+            elif len(blocked_secondary) >= 2:
+                severity = "medium"
+                title = "Secondary AI crawlers blocked in robots.txt"
+            else:
+                severity = "low"
+                title = "Secondary AI crawler blocked in robots.txt"
+
+            ev_parts = [f"[{EvidenceState.CONFIRMED.value}] {len(blocked)} AI crawler(s) blocked in robots.txt: {', '.join(blocked_sorted)}."]
+            if blocked_major:
+                ev_parts.append(f"Blocked major search agents: {', '.join(blocked_major)}.")
+            if allowed_major:
+                ev_parts.append(f"Allowed major search agents: {', '.join(allowed_major)}.")
+            evidence_str = " ".join(ev_parts)
+
             agents_sample = ", ".join(blocked_sorted[:4])
+            action_str = (
+                f"Review robots.txt and update Disallow directives specifically for {agents_sample} "
+                f"to permit AI-driven discovery while protecting private administrative paths."
+            )
+
             findings.append(_finding(
                 "CR-001",
-                "AI crawlers explicitly blocked by robots.txt",
-                "critical",
-                f"{len(blocked)} AI crawler(s) blocked: {', '.join(blocked_sorted)}. "
-                f"These bots cannot index site content.",
-                f"Review robots.txt and remove or narrow Disallow rules for the blocked crawler(s) "
-                f"({agents_sample}) to allow AI-driven discovery of your brand content.",
+                title,
+                severity,
+                evidence_str,
+                action_str,
+                blocked_sample=[{"agent": a} for a in blocked_sorted],
+                blocked_count=len(blocked_sorted),
             ))
     except Exception as exc:
         logger.debug("CR-001 error: %s", exc)

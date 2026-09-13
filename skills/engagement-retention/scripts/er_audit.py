@@ -32,6 +32,7 @@ from http_client import (
     AuditDeadline,
     HttpClient,
     PageResult,
+    FetchState,
     normalise_url,
     is_same_origin,
     is_auth_or_utility_url,
@@ -253,16 +254,20 @@ def _check_er001(
             elif len(h1_tags) > 1:
                 multiple_h1.append(url)
 
-            # Visible H1 (not hidden)
+            # Visible H1 (not hidden, with substantive text or accessible image alt)
             if h1_tags:
-                all_hidden = True
+                has_meaningful_visible_h1 = False
                 for h1 in h1_tags:
                     style = h1.get("style", "")
-                    if "display:none" not in style.replace(" ", "").lower() and \
-                       "visibility:hidden" not in style.replace(" ", "").lower():
-                        all_hidden = False
+                    if "display:none" in style.replace(" ", "").lower() or \
+                       "visibility:hidden" in style.replace(" ", "").lower():
+                        continue
+                    text = h1.get_text(strip=True)
+                    has_img_alt = any(bool(img.get("alt", "").strip()) for img in h1.find_all("img"))
+                    if text or has_img_alt:
+                        has_meaningful_visible_h1 = True
                         break
-                if all_hidden:
+                if not has_meaningful_visible_h1:
                     missing_h1.append(url)
 
             # Navigation check (skip auth/utility pages which intentionally lack global site navigation)
@@ -592,10 +597,18 @@ def _check_er004(
             # Check if we already have this result
             pr = page_results.get(link)
             if pr:
+                # State isolation: If this page was rate-limited (429), WAF-blocked (403),
+                # or excluded by robots, it is access-controlled / limited, NOT a broken dead link!
+                if pr.effective_fetch_state in (
+                    FetchState.RATE_LIMITED,
+                    FetchState.WAF_BLOCKED,
+                    FetchState.BLOCKED_BY_ROBOTS,
+                ) or pr.status_code in (401, 403, 429):
+                    continue
                 tested_count += 1
-                if pr.status_code and pr.status_code >= 400:
+                if pr.status_code and (pr.status_code in (404, 410) or pr.status_code >= 500):
                     broken.append(f"{link} (HTTP {pr.status_code})")
-                elif pr.status_code is None and pr.error:
+                elif pr.status_code is None and pr.error and "robots" not in pr.error.lower():
                     broken.append(f"{link} ({pr.error[:60]})")
                 continue
 
@@ -607,10 +620,13 @@ def _check_er004(
                     head = http_client.head(link)
                 if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
                     break
+                # State isolation: 401, 403, 429 are access control / rate limits, NOT dead links
+                if head.status_code in (401, 403, 429):
+                    continue
                 tested_count += 1
-                if head.status_code and head.status_code >= 400:
+                if head.status_code and (head.status_code in (404, 410) or head.status_code >= 500):
                     broken.append(f"{link} (HTTP {head.status_code})")
-                elif head.status_code is None and head.error:
+                elif head.status_code is None and head.error and "robots" not in head.error.lower():
                     broken.append(f"{link} ({head.error[:60]})")
             except Exception:
                 if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
@@ -627,7 +643,7 @@ def _check_er004(
                 "ER-004",
                 "High broken internal link ratio",
                 severity,
-                f"[{EvidenceState.CONTRADICTED.value}] {len(broken)}/{tested_count} sampled internal links are "
+                f"[{EvidenceState.CONFIRMED.value}] {len(broken)}/{tested_count} sampled internal links are "
                 f"broken ({ratio:.0%}): " + "; ".join(sorted(broken)[:5]),
                 "Audit and fix all broken internal links. Use a link checker "
                 "tool to identify and correct or remove dead links across "
@@ -641,7 +657,7 @@ def _check_er004(
                 "ER-004",
                 "Broken internal links detected",
                 "medium",
-                f"[{EvidenceState.CONTRADICTED.value}] {len(broken)} broken link(s) found in sample of "
+                f"[{EvidenceState.CONFIRMED.value}] {len(broken)} broken link(s) found in sample of "
                 f"{tested_count}: " + "; ".join(sorted(broken)[:5]),
                 "Fix broken internal links to maintain site integrity. "
                 "Even a small number of dead links reduces crawler "
@@ -1047,11 +1063,18 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
 
     checks_available = 8
     if not usable_frontier:
+        has_blocked = any(
+            page_results.get(u) and getattr(page_results[u], "effective_fetch_state", None) in (
+                FetchState.RATE_LIMITED, FetchState.WAF_BLOCKED, FetchState.BLOCKED_BY_ROBOTS, FetchState.HTTP_ERROR
+            )
+            for u in frontier
+        )
         return {
             "domain": "engagement-retention",
             "checks_available": checks_available,
             "checks_attempted": 0,
-            "checks_skipped": checks_available,
+            "checks_skipped": 0 if has_blocked else checks_available,
+            "checks_blocked": checks_available if has_blocked else 0,
             "pages_analyzed": 0,
             "pages_discovered": len(frontier),
             "errors": ["Skipped: no usable HTML pages fetched (pages rate-limited, WAF-blocked, or errored)."],
@@ -1078,6 +1101,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
         "checks_available": checks_available,
         "checks_attempted": checks_available,
         "checks_skipped": 0,
+        "checks_blocked": 0,
         "pages_analyzed": len(usable_frontier),
         "pages_discovered": len(frontier),
         "errors": errors,

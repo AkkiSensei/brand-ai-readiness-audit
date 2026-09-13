@@ -28,7 +28,7 @@ _SCRIPTS_DIR = (
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from http_client import AuditDeadline, HttpClient, PageResult, normalise_url, is_same_origin, EvidenceState
+from http_client import AuditDeadline, HttpClient, PageResult, FetchState, normalise_url, is_same_origin, EvidenceState
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +507,7 @@ def _check_tc001(
                 "TC-001",
                 "Invalid sameAs URLs in Organization schema",
                 "medium",
-                f"[{EvidenceState.CONTRADICTED.value}] {len(invalid_urls)} sameAs URL(s) are malformed: "
+                f"[{EvidenceState.CONFIRMED.value}] {len(invalid_urls)} sameAs URL(s) are malformed: "
                 + "; ".join(sorted(invalid_urls)[:5]),
                 "Fix or remove invalid sameAs URLs. Each must be a valid "
                 "HTTP/HTTPS URL pointing to an authoritative profile.",
@@ -843,10 +843,10 @@ def _check_tc003(
                 )
                 if head.status_code and 200 <= head.status_code < 400:
                     continue
-                elif is_walled_garden and (head.status_code == 999 or head.status_code in (401, 403)):
-                    # Anti-bot response confirms endpoint exists
+                elif head.status_code in (401, 403, 429) or (is_walled_garden and head.status_code == 999):
+                    # Access restriction or anti-bot challenge indicates endpoint exists; not a dead link
                     continue
-                elif head.status_code and head.status_code >= 400:
+                elif head.status_code and (head.status_code in (404, 410) or head.status_code >= 500):
                     if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
                         break
                     code = head.status_code
@@ -1066,19 +1066,22 @@ def _check_tc004_tc006(
                     pages_checked=len(valid_pages),
                 ))
 
-        # TC-006: Missing Organization disambiguators (evaluated only when Organization schema exists)
+        # TC-006: Missing Organization disambiguators (evaluated across all Organization blocks)
         if org_blocks:
+            has_foundingDate = any(bool(block.get("foundingDate")) for block in org_blocks)
+            has_address = any(bool(block.get("address")) for block in org_blocks)
+            has_knowsAbout = any(bool(block.get("knowsAbout")) for block in org_blocks)
+            has_legalName = any(bool(block.get("legalName")) for block in org_blocks)
+
             missing_disambig: list[str] = []
-            for block in org_blocks:
-                if not block.get("foundingDate"):
-                    missing_disambig.append("foundingDate")
-                if not block.get("address"):
-                    missing_disambig.append("address")
-                if not block.get("knowsAbout"):
-                    missing_disambig.append("knowsAbout")
-                if not block.get("legalName"):
-                    missing_disambig.append("legalName")
-                break  # Check primary org block only
+            if not has_foundingDate:
+                missing_disambig.append("foundingDate")
+            if not has_address:
+                missing_disambig.append("address")
+            if not has_knowsAbout:
+                missing_disambig.append("knowsAbout")
+            if not has_legalName:
+                missing_disambig.append("legalName")
 
             if missing_disambig:
                 unique_missing = sorted(dict.fromkeys(missing_disambig))
@@ -1086,7 +1089,7 @@ def _check_tc004_tc006(
                     "TC-006",
                     "Organization schema missing disambiguation properties",
                     "medium",
-                    f"Primary Organization block is missing: "
+                    f"Organization markup across pages is missing: "
                     + ", ".join(unique_missing),
                     "Add foundingDate, address, legalName, and knowsAbout "
                     "to your Organization JSON-LD to help AI engines "
@@ -1240,11 +1243,18 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
 
     checks_available = 6
     if not usable_frontier:
+        has_blocked = any(
+            page_results.get(u) and getattr(page_results[u], "effective_fetch_state", None) in (
+                FetchState.RATE_LIMITED, FetchState.WAF_BLOCKED, FetchState.BLOCKED_BY_ROBOTS, FetchState.HTTP_ERROR
+            )
+            for u in frontier
+        )
         return {
             "domain": "trust-entity-corroboration",
             "checks_available": checks_available,
             "checks_attempted": 0,
-            "checks_skipped": checks_available,
+            "checks_skipped": 0 if has_blocked else checks_available,
+            "checks_blocked": checks_available if has_blocked else 0,
             "pages_analyzed": 0,
             "pages_discovered": len(frontier),
             "errors": ["Skipped: no usable HTML pages fetched (pages rate-limited, WAF-blocked, or errored)."],
@@ -1269,6 +1279,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
         "checks_available": checks_available,
         "checks_attempted": checks_available,
         "checks_skipped": 0,
+        "checks_blocked": 0,
         "pages_analyzed": len(usable_frontier),
         "pages_discovered": len(frontier),
         "errors": errors,

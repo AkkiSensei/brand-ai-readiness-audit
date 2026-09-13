@@ -909,6 +909,7 @@ def _build_coverage(
             errors_list = result.get("errors", [])
             attempted = result.get("checks_attempted", avail)
             skipped = result.get("checks_skipped", max(0, avail - attempted))
+            blocked = result.get("checks_blocked", 0)
             findings_count = len(result.get("findings", []))
             cov_entry: dict[str, Any] = {
                 "pages_checked": pages_audited,
@@ -916,7 +917,7 @@ def _build_coverage(
                 "checks_available": avail,
                 "checks_attempted": attempted,
                 "checks_skipped": skipped,
-                "checks_blocked": 0,
+                "checks_blocked": blocked,
                 "findings_produced": findings_count,
                 "errors": len(errors_list),
                 "render_confidence": "low" if low_conf_count > 0 else "high",
@@ -938,6 +939,7 @@ def _build_coverage(
             domain_low_conf = min(low_conf_count, pages_checked) if pages_checked > 0 else 0
             attempted = result.get("checks_attempted", avail if pages_checked > 0 else 0)
             skipped = result.get("checks_skipped", max(0, avail - attempted))
+            blocked = result.get("checks_blocked", 0)
             findings_count = len(result.get("findings", []))
 
             # Determine domain coverage state
@@ -971,7 +973,7 @@ def _build_coverage(
                 "checks_available": avail,
                 "checks_attempted": attempted,
                 "checks_skipped": skipped,
-                "checks_blocked": 0,
+                "checks_blocked": blocked,
                 "findings_produced": findings_count,
                 "errors": len(errors_list),
                 "render_confidence": "low" if domain_low_conf > 0 else "high",
@@ -1013,10 +1015,45 @@ def _build_coverage(
 
 def _build_proactive_strings(
     domain_results: dict[str, dict | None],
+    proactive_findings: list[dict] | None = None,
 ) -> list[str]:
-    """Collect proactive_candidates from domain runners in canonical order as plain strings."""
+    """Collect proactive recommendations in unified format conforming to report schema.
+
+    Combines the primary proactive engine findings (PA-001..PA-006, PA-CANONICAL)
+    and any domain-specific structural recommendations without duplication.
+    """
     strings: list[str] = []
     seen: set[str] = set()
+
+    # 1. Primary engine proactive findings (PA-001..PA-006, PA-CANONICAL)
+    if proactive_findings:
+        for pf in proactive_findings:
+            if not isinstance(pf, dict):
+                continue
+            title = pf.get("title", "").strip()
+            action = pf.get("suggested_action", {})
+            if isinstance(action, dict):
+                summary = action.get("summary", "").strip()
+            elif isinstance(action, str):
+                summary = action.strip()
+            else:
+                summary = ""
+
+            if title and summary:
+                full = f"{title}: {summary}"
+            elif title:
+                full = title
+            elif summary:
+                full = summary
+            else:
+                continue
+
+            full = full.strip()
+            if full and full not in seen and len(full) >= 10:
+                seen.add(full)
+                strings.append(full)
+
+    # 2. Domain-runner proactive candidates
     canonical_domain_order = [
         "crawl-render-access",
         "structured-fact-extraction",
@@ -1045,6 +1082,7 @@ def _build_proactive_strings(
             if full and full not in seen and len(full) >= 10:
                 seen.add(full)
                 strings.append(full)
+
     return strings
 
 
@@ -1727,7 +1765,7 @@ def _run_pipeline(
     # ==============================================================
     # STEP 15: Proactive recommendations & Remediation themes
     # ==============================================================
-    proactive_strings = _build_proactive_strings(domain_results)
+    proactive_strings = _build_proactive_strings(domain_results, proactive_findings=proactive_findings)
     remediation_themes = _build_remediation_themes(sorted_findings)
 
     report: dict[str, Any] = {

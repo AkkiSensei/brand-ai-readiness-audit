@@ -14,7 +14,7 @@
     "huge_sitemap_bounded": "PASS",
     "sitemap_urls_parsed": 500,
     "peak_memory_mb": 41.1,
-    "stress_duration_seconds": 1.67
+    "stress_duration_seconds": 1.66
   },
   "partial_failure": {
     "http_error_schema_valid": "PASS",
@@ -53,7 +53,7 @@
   },
   "runtime_budget": {
     "minimal_site": {
-      "wall_clock_seconds": 1.066,
+      "wall_clock_seconds": 0.359,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 9,
@@ -61,7 +61,7 @@
       "within_5min_budget": true
     },
     "typical_site": {
-      "wall_clock_seconds": 1.064,
+      "wall_clock_seconds": 0.363,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 8,
@@ -69,7 +69,7 @@
       "within_5min_budget": true
     },
     "js_heavy_site": {
-      "wall_clock_seconds": 5.648,
+      "wall_clock_seconds": 5.0,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 9,
@@ -77,7 +77,7 @@
       "within_5min_budget": true
     },
     "adversarial_slow_site": {
-      "wall_clock_seconds": 8.02,
+      "wall_clock_seconds": 8.009,
       "audit_status": "blocked",
       "pages_audited": 0,
       "total_findings": 0,
@@ -85,7 +85,7 @@
       "within_5min_budget": true
     },
     "multipage_crawl": {
-      "wall_clock_seconds": 5.28,
+      "wall_clock_seconds": 4.338,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 9,

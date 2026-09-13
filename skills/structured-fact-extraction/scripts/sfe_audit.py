@@ -29,7 +29,7 @@ _SCRIPTS_DIR = (
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from http_client import HttpClient, PageResult, normalise_url, is_auth_or_utility_url, EvidenceState
+from http_client import HttpClient, PageResult, FetchState, normalise_url, is_auth_or_utility_url, EvidenceState
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +367,7 @@ def _check_sf001_sf002(
             "SF-002",
             "Invalid JSON-LD syntax detected",
             "high",
-            f"[{EvidenceState.CONTRADICTED.value}] {len(unique_err_urls)} page(s) have JSON-LD blocks that "
+            f"[{EvidenceState.CONFIRMED.value}] {len(unique_err_urls)} page(s) have JSON-LD blocks that "
             "fail JSON parsing: " + "; ".join(unique_err_urls[:5]),
             "Fix JSON syntax errors in application/ld+json script blocks. "
             "Validate with Google Rich Results Test.",
@@ -984,11 +984,18 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
 
     checks_available = 8
     if not usable_frontier:
+        has_blocked = any(
+            page_results.get(u) and getattr(page_results[u], "effective_fetch_state", None) in (
+                FetchState.RATE_LIMITED, FetchState.WAF_BLOCKED, FetchState.BLOCKED_BY_ROBOTS, FetchState.HTTP_ERROR
+            )
+            for u in frontier
+        )
         return {
             "domain": "structured-fact-extraction",
             "checks_available": checks_available,
             "checks_attempted": 0,
-            "checks_skipped": checks_available,
+            "checks_skipped": 0 if has_blocked else checks_available,
+            "checks_blocked": checks_available if has_blocked else 0,
             "pages_analyzed": 0,
             "pages_discovered": len(frontier),
             "errors": ["Skipped: no usable HTML pages fetched (pages rate-limited, WAF-blocked, or errored)."],
@@ -1015,6 +1022,7 @@ def run_audit(target_url: str, http_client: HttpClient, **kwargs: Any) -> dict:
         "checks_available": checks_available,
         "checks_attempted": checks_available,
         "checks_skipped": 0,
+        "checks_blocked": 0,
         "pages_analyzed": len(usable_frontier),
         "pages_discovered": len(frontier),
         "errors": errors,
