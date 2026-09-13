@@ -1648,6 +1648,10 @@ def _cli() -> None:
         help="Enable Playwright headless JS rendering (default: False)",
     )
     parser.add_argument(
+        "--timeout-s", type=int, default=240,
+        help="Overall audit timeout budget in seconds (default: 240)",
+    )
+    parser.add_argument(
         "--output", type=str, default=None,
         help="Path to write JSON report (default: stdout)",
     )
@@ -1657,6 +1661,7 @@ def _cli() -> None:
         target_url=args.url,
         max_pages=args.max_pages,
         render_js=args.render_js,
+        timeout_s=args.timeout_s,
     )
 
     report_json = json.dumps(report, indent=2, ensure_ascii=False)

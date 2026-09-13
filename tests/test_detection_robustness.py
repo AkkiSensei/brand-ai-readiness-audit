@@ -37,8 +37,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "skills" / "crawl-render-access" / "scripts"))
 sys.path.insert(0, str(_ROOT / "skills" / "trust-entity-corroboration" / "scripts"))
 sys.path.insert(0, str(_ROOT / "skills" / "structured-fact-extraction" / "scripts"))
+sys.path.insert(0, str(_ROOT / "skills" / "engagement-retention" / "scripts"))
 
 from http_client import PageResult
+from er_audit import _check_er001
 from tec_audit import (
     _check_tc002,
     _check_tc004_tc006,
@@ -377,3 +379,41 @@ def test_tc004_casing_variants_vs_corporate_suffixes():
     f2 = _check_tc004_tc006([url2], {url2: pr2})
     cap2 = [f for f in f2 if f.get("local_id") == "TC-004" and "capitalisation" in f.get("title", "").lower()]
     assert len(cap2) == 1, f"Expected capitalization finding for TechBrand/techbrand/TECHBRAND, got: {f2}"
+
+
+# ===========================================================================
+# 7. NAVIGATION DETECTION ROBUSTNESS (ER-001)
+# ===========================================================================
+
+def test_er001_multiple_headers_and_role_navigation():
+    """Verify that secondary headers or small breadcrumb role='navigation' elements
+    preceding the main navigation do not cause false-positive 'Pages missing primary navigation'."""
+    html = """<!DOCTYPE html>
+    <html>
+    <head><title>Test Page</title></head>
+    <body>
+      <h1>Main Heading</h1>
+      <!-- First role="navigation" is a small breadcrumb bar with only 1 link -->
+      <div role="navigation" aria-label="Breadcrumb">
+        <a href="/">Home</a>
+      </div>
+      <!-- First header is a small article header without links -->
+      <article>
+        <header><h3>Article Title</h3></header>
+        <p>Some content...</p>
+      </article>
+      <!-- Second role="navigation" contains full main menu with >= 3 links -->
+      <div role="navigation" aria-label="Main Menu">
+        <a href="/about">About</a>
+        <a href="/products">Products</a>
+        <a href="/pricing">Pricing</a>
+        <a href="/contact">Contact</a>
+      </div>
+    </body>
+    </html>"""
+
+    url = "https://example.com/nav-test"
+    pr = PageResult(url=url, status_code=200, soup=BeautifulSoup(html, "html.parser"), html=html)
+    findings = _check_er001([url], {url: pr})
+    nav_findings = [f for f in findings if f.get("local_id") == "ER-001" and "navigation" in f.get("title", "").lower()]
+    assert len(nav_findings) == 0, f"False positive ER-001 navigation finding triggered: {nav_findings}"

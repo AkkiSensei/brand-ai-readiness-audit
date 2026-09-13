@@ -255,19 +255,19 @@ def _check_er001(
 
             # Fallback: check for header with links
             if not has_nav:
-                header = pr.soup.find("header")
-                if header:
+                for header in pr.soup.find_all("header"):
                     links = header.find_all("a")
                     if len(links) >= NAV_MIN_LINKS:
                         has_nav = True
+                        break
 
             # Fallback: role="navigation"
             if not has_nav:
-                role_nav = pr.soup.find(attrs={"role": "navigation"})
-                if role_nav:
+                for role_nav in pr.soup.find_all(attrs={"role": "navigation"}):
                     links = role_nav.find_all("a")
                     if len(links) >= NAV_MIN_LINKS:
                         has_nav = True
+                        break
 
             if not has_nav:
                 missing_nav.append(url)
