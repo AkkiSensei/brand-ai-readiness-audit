@@ -34,6 +34,7 @@ from http_client import (
     PageResult,
     normalise_url,
     is_same_origin,
+    EvidenceState,
 )
 
 logger = logging.getLogger(__name__)
@@ -567,8 +568,7 @@ def _check_er004(
             except Exception:
                 if isinstance(eff_deadline, AuditDeadline) and eff_deadline.expired():
                     break
-                tested_count += 1
-                broken.append(f"{link} (request failed)")
+                # Network timeout or transport failure: NOT_OBSERVABLE, do not falsely count as broken internal link
 
         if tested_count == 0:
             return findings
@@ -580,7 +580,7 @@ def _check_er004(
                 "ER-004",
                 "High broken internal link ratio",
                 severity,
-                f"{len(broken)}/{tested_count} sampled internal links are "
+                f"[{EvidenceState.CONTRADICTED.value}] {len(broken)}/{tested_count} sampled internal links are "
                 f"broken ({ratio:.0%}): " + "; ".join(sorted(broken)[:5]),
                 "Audit and fix all broken internal links. Use a link checker "
                 "tool to identify and correct or remove dead links across "
@@ -594,7 +594,7 @@ def _check_er004(
                 "ER-004",
                 "Broken internal links detected",
                 "medium",
-                f"{len(broken)} broken link(s) found in sample of "
+                f"[{EvidenceState.CONTRADICTED.value}] {len(broken)} broken link(s) found in sample of "
                 f"{tested_count}: " + "; ".join(sorted(broken)[:5]),
                 "Fix broken internal links to maintain site integrity. "
                 "Even a small number of dead links reduces crawler "

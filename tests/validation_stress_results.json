@@ -14,7 +14,7 @@
     "huge_sitemap_bounded": "PASS",
     "sitemap_urls_parsed": 500,
     "peak_memory_mb": 41.07,
-    "stress_duration_seconds": 1.62
+    "stress_duration_seconds": 2.9
   },
   "partial_failure": {
     "http_error_schema_valid": "PASS",
@@ -26,7 +26,7 @@
   },
   "determinism": {
     "repeatability_5_runs": "PASS",
-    "finding_count": 12,
+    "finding_count": 10,
     "finding_ids": [
       "F-001",
       "F-002",
@@ -37,17 +37,15 @@
       "F-007",
       "F-008",
       "F-009",
-      "F-010",
-      "F-011",
-      "F-012"
+      "F-010"
     ],
     "summary_counts": {
-      "total_findings": 12,
+      "total_findings": 10,
       "critical": 0,
       "high": 3,
       "medium": 5,
       "low": 0,
-      "info": 4,
+      "info": 2,
       "coverage": {
         "pages_audited": 2,
         "pages_in_sitemap": 10000,
@@ -57,31 +55,31 @@
   },
   "runtime_budget": {
     "minimal_site": {
-      "wall_clock_seconds": 0.345,
+      "wall_clock_seconds": 0.405,
+      "audit_status": "completed",
+      "pages_audited": 1,
+      "total_findings": 9,
+      "schema_valid": true,
+      "within_5min_budget": true
+    },
+    "typical_site": {
+      "wall_clock_seconds": 0.435,
       "audit_status": "completed",
       "pages_audited": 1,
       "total_findings": 12,
       "schema_valid": true,
       "within_5min_budget": true
     },
-    "typical_site": {
-      "wall_clock_seconds": 0.282,
-      "audit_status": "completed",
-      "pages_audited": 1,
-      "total_findings": 14,
-      "schema_valid": true,
-      "within_5min_budget": true
-    },
     "js_heavy_site": {
-      "wall_clock_seconds": 5.083,
+      "wall_clock_seconds": 5.308,
       "audit_status": "completed",
       "pages_audited": 1,
-      "total_findings": 10,
+      "total_findings": 8,
       "schema_valid": true,
       "within_5min_budget": true
     },
     "adversarial_slow_site": {
-      "wall_clock_seconds": 8.008,
+      "wall_clock_seconds": 8.024,
       "audit_status": "blocked",
       "pages_audited": 0,
       "total_findings": 0,
@@ -89,10 +87,10 @@
       "within_5min_budget": true
     },
     "multipage_crawl": {
-      "wall_clock_seconds": 4.356,
+      "wall_clock_seconds": 4.436,
       "audit_status": "completed",
       "pages_audited": 1,
-      "total_findings": 14,
+      "total_findings": 13,
       "schema_valid": true,
       "within_5min_budget": true
     }

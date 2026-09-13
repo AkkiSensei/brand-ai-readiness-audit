@@ -479,6 +479,36 @@ class SSRFSafeHTTPAdapter(HTTPAdapter):
 # Data Types
 # ---------------------------------------------------------------------------
 
+class EvidenceState(str, Enum):
+    """Minimal observation state of evidence for audited claims, facts, and assets.
+
+    Distinguishes positive observation, definitive contradiction, absence of
+    asserted corroboration, and unobservable/unreachable targets without
+    manufacturing certainty.
+    """
+
+    CONFIRMED = "CONFIRMED"                      # Direct observation verified (e.g. resolving accreditation link, confirmed entity/markup)
+    CONTRADICTED = "CONTRADICTED"                # Definitively disproven or broken (e.g. 404/410 broken link, contradictory facts)
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE" # Claim or fact asserted but uncorroborated (e.g. claim without verification link, unstated date)
+    NOT_OBSERVABLE = "NOT_OBSERVABLE"            # Target source unreachable, timeout, transport failure, renderer unavailable
+
+
+class CoverageState(str, Enum):
+    """Compact, deterministic audit coverage state.
+
+    Indicates how much of the target and domain checks were genuinely observable:
+    - COMPLETE: Full observation; all planned pages and checks executed with high confidence.
+    - PARTIAL: Substantial audit ran, but bounded by budget, sampled probes, or partial responses.
+    - LIMITED: Key evidence sources unobservable (e.g. static-only without JS, unverified external links).
+    - UNAVAILABLE: Target or domain blocked, unreachable, or failed before inspection.
+    """
+
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    LIMITED = "LIMITED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 class RenderState(str, Enum):
     """Explicit observation state of browser rendering for a page."""
 
@@ -557,6 +587,9 @@ class PageResult:
 
     render_state: RenderState = RenderState.STATIC_ONLY
     """Explicit observation state for dynamic rendering."""
+
+    evidence_state: Optional[EvidenceState] = None
+    """Observation state of evidence for this page resource."""
 
     @property
     def is_html(self) -> bool:

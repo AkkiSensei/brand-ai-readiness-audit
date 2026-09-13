@@ -52,6 +52,7 @@ from http_client import (
     extract_text_ratio,
     normalise_url,
     is_same_origin,
+    EvidenceState,
 )
 
 logger = logging.getLogger(__name__)
@@ -718,7 +719,9 @@ def _check_cr003_cr004(
 
             has_substantial_text = (word_count >= 250 and len(visible_text) >= 1000)
             effective_ratio = raw_ratio
-            if not has_substantial_text:
+            # Only infer client-side blanking if the page contains scripts
+            has_scripts = bool(pr.soup.find("script") or is_spa)
+            if not has_substantial_text and has_scripts:
                 disp = f"{url} (ratio={effective_ratio:.2f})"
                 if effective_ratio < TEXT_BLANK_THRESH and (word_count < 80 or is_spa):
                     severe_urls.add(url)
@@ -727,7 +730,7 @@ def _check_cr003_cr004(
                     moderate_urls.add(url)
                     display[url] = disp
 
-            has_blanking = (not has_substantial_text) and (raw_ratio < TEXT_BLANK_THRESH or is_spa)
+            has_blanking = (not has_substantial_text) and has_scripts and (raw_ratio < TEXT_BLANK_THRESH or is_spa)
             if has_blanking:
                 pr.render_confidence = "low"
             else:
@@ -741,6 +744,7 @@ def _check_cr003_cr004(
                 "CR-003",
                 "Severe CSR text blanking — content invisible to non-JS crawlers",
                 "critical",
+                f"[{EvidenceState.CONFIRMED.value if renderer is not None else EvidenceState.INSUFFICIENT_EVIDENCE.value}] "
                 f"{len(combined_urls)} page(s) have critically low text-to-HTML ratio "
                 f"(< {TEXT_BLANK_THRESH}): " + "; ".join(evidence_strs),
                 "Implement server-side rendering (SSR) or static-site generation "
@@ -758,6 +762,7 @@ def _check_cr003_cr004(
                 "CR-004",
                 "Moderate CSR text blanking — reduced content in raw HTML",
                 "high",
+                f"[{EvidenceState.CONFIRMED.value if renderer is not None else EvidenceState.INSUFFICIENT_EVIDENCE.value}] "
                 f"{len(moderate_final)} page(s) have low text ratio "
                 f"(< {CSR_WARN_THRESH}): " + "; ".join(evidence_strs),
                 "Review pages for JS-dependent content rendering. Consider "

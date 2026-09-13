@@ -40,6 +40,31 @@ across multiple authoritative sources. This skill audits three pillars:
    capitalisation, multiple operating names without `alternateName` markup,
    and absent `legalName` fields.
 
+## Inputs
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `target_url` | `str` | Root URL of the brand website under audit |
+| `http_client` | `HttpClient` | Shared SSRF-safe HTTP client from crawl-render-access |
+| `crawl_frontier` | `list[str]` | Ordered list of discovered page URLs from crawl-render-access |
+| `page_results` | `dict[str, PageResult]` | Pre-fetched parsed DOM results keyed by URL |
+| `timeout_s` | `int` | Global audit wall-clock budget in seconds (default 240) |
+| `t_start` | `float` | `time.monotonic()` timestamp of audit start |
+| `deadline` | `AuditDeadline` | Monotonic deadline object for bounded sub-skill execution |
+
+## Output
+
+Returns a `dict` with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `domain` | `str` | `"trust-entity-corroboration"` |
+| `pages_analyzed` | `int` | Number of pages inspected by this skill |
+| `pages_discovered` | `int` | Number of pages in the crawl frontier |
+| `errors` | `list[str]` | Any non-fatal errors encountered |
+| `findings` | `list[dict]` | Domain findings (TC-001..TC-006); each has `local_id`, `title`, `severity`, `category`, `evidence`, `suggested_action`, `related_to` |
+| `proactive_candidates` | `list` | Structural observations passed to the proactive recommendation engine |
+
 ## Checks & Finding IDs
 
 | Check ID | Finding Title | Severity | Trigger Condition |

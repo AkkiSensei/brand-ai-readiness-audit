@@ -133,6 +133,8 @@ def _extract_jsonld_blocks(soup: Any) -> list[dict]:
 # ------------------------------------------------------------------
 # PA-001: llms.txt / llms-full.txt
 # ------------------------------------------------------------------
+# PA-001: llms.txt / llms-full.txt / agents.md
+# ------------------------------------------------------------------
 
 def _pa001(
     target_url: str,
@@ -140,7 +142,7 @@ def _pa001(
     existing_ids: set[str],
     deadline: Optional[Any] = None,
 ) -> Optional[dict]:
-    """Check for /llms.txt or /llms-full.txt availability."""
+    """Check for /llms.txt, /llms-full.txt, or /agents.md availability."""
     try:
         if deadline and hasattr(deadline, "expired") and deadline.expired():
             return None
@@ -149,7 +151,7 @@ def _pa001(
         if parsed.port:
             origin += f":{parsed.port}"
 
-        for path in ("/llms.txt", "/llms-full.txt"):
+        for path in ("/llms.txt", "/llms-full.txt", "/agents.md"):
             if deadline and hasattr(deadline, "expired") and deadline.expired():
                 return None
             url = origin + path
@@ -162,14 +164,14 @@ def _pa001(
 
         return _make_finding(
             "PA-001",
-            "No llms.txt file found for LLM-readable site description",
+            "No llms.txt or agents.md manifest found for AI agent discoverability",
             target_url,
-            "Neither /llms.txt nor /llms-full.txt returned a successful "
-            "response. These files provide a structured site description "
-            "optimised for large language models.",
-            "Publish an /llms.txt file at your site root describing your "
-            "brand, key offerings, and site structure in plain text format "
-            "optimised for LLM consumption. See llmstxt.org for the specification.",
+            "Neither /llms.txt, /llms-full.txt, nor /agents.md returned a successful "
+            "response. These machine-readable files provide structured site summaries "
+            "and documentation endpoints for LLMs and autonomous search agents.",
+            "Publish an /llms.txt or /agents.md file at your site root describing your "
+            "brand, core offerings, documentation endpoints, and site structure in plain "
+            "Markdown format. See llmstxt.org for the standardized specification.",
         )
     except Exception as exc:
         logger.debug("PA-001 error: %s", exc)
@@ -243,12 +245,12 @@ def _pa002(
             "PA-002",
             "JSON-LD entities lack unified @graph with @id cross-references",
             first_url,
-            f"Across {total_ld_pages} page(s) with JSON-LD, no unified @graph "
-            "structure with meaningful @id cross-entity references was detected.",
-            "Consolidate your JSON-LD entities into a single @graph array per "
+            f"Across {total_ld_pages} page(s) with JSON-LD, schemas exist as isolated blocks "
+            "without a unified @graph array or @id cross-entity references.",
+            "Consolidate isolated JSON-LD script blocks into a single @graph array per "
             "page and use stable @id URIs (e.g. '#organization', '#website') "
-            "to cross-reference entities. This helps AI engines understand "
-            "relationships between your Organization, WebSite, and content.",
+            "to cross-reference entities. This enables AI knowledge engines to connect your "
+            "Organization, WebSite, and content into an integrated knowledge graph.",
         )
     except Exception as exc:
         logger.debug("PA-002 error: %s", exc)
@@ -291,13 +293,13 @@ def _pa003(
         first_url = next(iter(page_results), "")
         return _make_finding(
             "PA-003",
-            "Section headings lack fragment IDs for deep linking",
+            "Section headings lack fragment IDs for deep linking and citation",
             first_url,
             f"Only {headings_with_id}/{headings_total} section headings "
             f"({ratio:.0%}) across {pages_checked} page(s) have id attributes.",
-            "Add stable id attributes to <h2> and <h3> headings to enable "
-            "deep linking and AI-engine citation of specific sections. "
-            "Use descriptive slugs (e.g. id='pricing-details').",
+            "Add stable slug id attributes (e.g. <h2 id='pricing-details'>) "
+            "to all <h2> and <h3> section headings. This enables AI answer engines (ChatGPT, "
+            "Perplexity, Gemini) to deep-link directly to the specific section citing your content.",
         )
     except Exception as exc:
         logger.debug("PA-003 error: %s", exc)
@@ -321,12 +323,16 @@ def _pa004(
             r"^(what|how|why|when|where|who|which|can|does|is|are|should)\b",
             re.IGNORECASE,
         )
+        _FILLER_PREAMBLES = re.compile(
+            r"^(in (today's|the modern|this)|when it comes to|it is (important|widely|essential)|as we all know|whether you are|looking for)\b",
+            re.IGNORECASE,
+        )
 
         for url, pr in page_results.items():
             if not pr or not pr.soup:
                 continue
 
-            # Only check article-like pages (has h1 and >2 paragraphs)
+            # Only check article/content-rich pages (has h1 and >= 3 paragraphs)
             h1 = pr.soup.find("h1")
             paragraphs = pr.soup.find_all("p")
             meaningful_paras = [
@@ -349,13 +355,14 @@ def _pa004(
             if not first_para_text:
                 continue
 
-            # Heuristic: long intro without direct answer signal
             words = first_para_text.split()
-            if len(words) > 50 and not _QUESTION_WORDS.match(first_para_text):
-                # Check if the first sentence is very long (> 200 chars without
-                # a period) suggesting a verbose preamble
-                first_sentence_end = first_para_text.find(".")
-                if first_sentence_end > 200 or first_sentence_end == -1:
+            has_filler = bool(_FILLER_PREAMBLES.search(first_para_text))
+            first_sentence_end = first_para_text.find(".")
+            has_long_first_sentence = (first_sentence_end > 180 or first_sentence_end == -1)
+
+            # Flag if opening paragraph is verbose without answering directly
+            if not _QUESTION_WORDS.match(first_para_text):
+                if has_filler or (len(words) > 30 and has_long_first_sentence) or len(words) > 50:
                     wordy_intros += 1
 
         if article_pages < 2 or wordy_intros < 2:
@@ -366,12 +373,12 @@ def _pa004(
             "PA-004",
             "Content pages may benefit from answer-first structure",
             first_url,
-            f"{wordy_intros}/{article_pages} article-like page(s) begin "
-            "with long introductory paragraphs rather than direct answers.",
-            "Restructure key content pages using an inverted pyramid style: "
-            "lead with the core answer or value proposition in the first "
-            "paragraph, then provide supporting details. AI engines prefer "
-            "concise, answer-oriented opening statements for citation.",
+            f"{wordy_intros}/{article_pages} content page(s) begin with long introductory "
+            "preambles rather than immediate declarative answers or key fact summaries.",
+            "Adopt an inverted pyramid, answer-first content structure: lead each page and major "
+            "section with a concise, direct answer or key takeaway in the very first sentence. "
+            "AI grounding systems (RAG) score opening text heavily when retrieving candidate "
+            "passages for direct answer generation.",
         )
     except Exception as exc:
         logger.debug("PA-004 error: %s", exc)
@@ -386,8 +393,20 @@ def _pa005(
     page_results: dict[str, PageResult],
     existing_ids: set[str],
 ) -> Optional[dict]:
-    """Check for RSS or Atom feed declarations."""
+    """Check for RSS or Atom feed declarations on content publishing sites."""
     try:
+        # Check if site has news/blog/article-like content where syndication is relevant
+        has_editorial_content = False
+        for url in page_results:
+            lower = url.lower()
+            if any(seg in lower for seg in ("/blog", "/news", "/article", "/post", "/updates", "/press", "/journal")):
+                has_editorial_content = True
+                break
+
+        # If no editorial content and very few pages (< 5), avoid recommending feeds unnecessarily
+        if not has_editorial_content and len(page_results) < 5:
+            return None
+
         for url, pr in page_results.items():
             if not pr or not pr.soup:
                 continue
@@ -399,13 +418,12 @@ def _pa005(
         first_url = next(iter(page_results), "")
         return _make_finding(
             "PA-005",
-            "No RSS or Atom feed detected",
+            "No RSS or Atom feed detected for content syndication",
             first_url,
             "No <link rel='alternate'> with type application/rss+xml or "
-            "application/atom+xml was found across any crawled page.",
-            "Publish an RSS or Atom feed for your blog, news, or product "
-            "updates. Syndication feeds enable AI aggregators and citation "
-            "engines to track your content freshness automatically.",
+            "application/atom+xml was found across crawled editorial pages.",
+            "Publish and link an RSS 2.0 or Atom feed (<link rel='alternate' type='application/rss+xml'>) "
+            "for your blog, news, or product updates to enable real-time freshness tracking by AI aggregators.",
         )
     except Exception as exc:
         logger.debug("PA-005 error: %s", exc)
@@ -437,6 +455,10 @@ def _pa006(
         current_agents: set[str] = set()
         ai_specific_allow = False
         ai_crawler_names_lower = {c.lower() for c in _AI_CRAWLERS}
+        ai_crawler_names_lower.update({
+            "gptbot", "claude-web", "perplexitybot", "google-extended",
+            "applebot-extended", "amazonbot", "cohere-ai", "meta-externalagent",
+        })
         in_user_agent_block = False
 
         for line in lines:
@@ -466,13 +488,11 @@ def _pa006(
             "PA-006",
             "No explicit Allow directive for AI crawlers in robots.txt",
             target_url,
-            "robots.txt does not contain any explicit Allow: directive "
-            "under an AI-crawler User-agent section (e.g. GPTBot, "
-            "Google-Extended). While absence of Disallow may suffice, "
-            "explicit Allow signals welcoming intent.",
-            "Add explicit User-agent/Allow blocks for key AI crawlers "
-            "(GPTBot, Google-Extended, anthropic-ai) in robots.txt to "
-            "signal that your content is open for AI indexing.",
+            "robots.txt does not contain an explicit Allow: directive under an "
+            "AI crawler User-agent section (e.g. GPTBot, Claude-Web, PerplexityBot, Google-Extended).",
+            "Add explicit User-agent and Allow: / directives for verified AI crawlers "
+            "(GPTBot, Claude-Web, PerplexityBot, Google-Extended) in /robots.txt to "
+            "guarantee unambiguous crawling authorization and prevent collateral blocking from wildcard rules.",
         )
     except Exception as exc:
         logger.debug("PA-006 error: %s", exc)
@@ -500,11 +520,12 @@ def _pa_canonical(
             first_url = next(iter(page_results), "")
             return _make_finding(
                 "PA-CANONICAL",
-                "Add rel=canonical link elements",
+                "Add rel=canonical link elements to consolidate citation signals",
                 first_url,
                 "No <link rel='canonical'> element was found across any crawled page.",
-                "Canonical tags prevent duplicate content issues and "
-                "consolidate link signals for AI citation engines.",
+                "Specify absolute, self-referential <link rel='canonical'> tags on every "
+                "indexable page. Canonical tags prevent duplicate content dilution across URL "
+                "parameters and tracking codes, consolidating link authority for AI citation engines.",
                 category="proactive",
             )
         return None

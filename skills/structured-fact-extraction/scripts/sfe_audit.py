@@ -29,7 +29,7 @@ _SCRIPTS_DIR = (
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from http_client import HttpClient, PageResult, normalise_url
+from http_client import HttpClient, PageResult, normalise_url, EvidenceState
 
 logger = logging.getLogger(__name__)
 
@@ -253,13 +253,19 @@ def _check_sf001_sf002(
                         homepage_has_org = True
                     present = _count_fields(entity, _ORG_REQUIRED | _ORG_RECOMMENDED)
                     if present < MIN_ORG_FIELDS:
+                        missing_req = _ORG_REQUIRED - set(entity.keys())
                         missing = (
                             _ORG_REQUIRED | _ORG_RECOMMENDED
                         ) - set(entity.keys())
                         incomplete_urls.append(url)
-                        missing_fields_detail.append(
-                            f"{url}: Organization missing {', '.join(sorted(missing)[:4])}"
-                        )
+                        if missing_req:
+                            missing_fields_detail.append(
+                                f"{url}: Organization missing required identity fields ({', '.join(sorted(missing_req))})"
+                            )
+                        else:
+                            missing_fields_detail.append(
+                                f"{url}: Organization missing recommended fields ({', '.join(sorted(missing)[:4])})"
+                            )
                 else:
                     if is_home:
                         homepage_has_nested_org = True
@@ -274,13 +280,19 @@ def _check_sf001_sf002(
                 if path == "root":
                     present = _count_fields(entity, _PRODUCT_REQUIRED | _PRODUCT_RECOMMENDED)
                     if present < MIN_PROD_FIELDS:
+                        missing_req = _PRODUCT_REQUIRED - set(entity.keys())
                         missing = (
                             _PRODUCT_REQUIRED | _PRODUCT_RECOMMENDED
                         ) - set(entity.keys())
                         incomplete_urls.append(url)
-                        missing_fields_detail.append(
-                            f"{url}: Product missing {', '.join(sorted(missing)[:4])}"
-                        )
+                        if missing_req:
+                            missing_fields_detail.append(
+                                f"{url}: Product missing required identity fields ({', '.join(sorted(missing_req))})"
+                            )
+                        else:
+                            missing_fields_detail.append(
+                                f"{url}: Product missing recommended fields ({', '.join(sorted(missing)[:4])})"
+                            )
 
     valid_pages = [
         u for u in frontier
@@ -301,7 +313,7 @@ def _check_sf001_sf002(
             "SF-001",
             "No JSON-LD structured data found on any page",
             "high",
-            f"Scanned {len(valid_pages)} page(s); zero contained "
+            f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] Scanned {len(valid_pages)} page(s); zero contained "
             "application/ld+json script blocks.",
             "Add Schema.org JSON-LD markup to at least the homepage "
             "(Organization), product pages (Product), and article pages "
@@ -346,7 +358,7 @@ def _check_sf001_sf002(
             "SF-002",
             "Invalid JSON-LD syntax detected",
             "high",
-            f"{len(unique_err_urls)} page(s) have JSON-LD blocks that "
+            f"[{EvidenceState.CONTRADICTED.value}] {len(unique_err_urls)} page(s) have JSON-LD blocks that "
             "fail JSON parsing: " + "; ".join(unique_err_urls[:5]),
             "Fix JSON syntax errors in application/ld+json script blocks. "
             "Validate with Google Rich Results Test.",
@@ -361,7 +373,7 @@ def _check_sf001_sf002(
             "SF-002",
             "JSON-LD schemas missing recommended properties",
             "medium",
-            "; ".join(sorted(missing_fields_detail)[:5]),
+            f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] " + "; ".join(sorted(missing_fields_detail)[:5]),
             "Add missing recommended properties to improve AI-engine "
             "understanding. Use Schema.org documentation as reference.",
             related=["SF-001"],
@@ -597,17 +609,30 @@ def _check_sf006(
     return findings
 
 
+def _is_evergreen_url(url: str) -> bool:
+    """Identify utility, policy, legal, or contact pages that do not require
+    frequent editorial revisions and should not be penalized as stale."""
+    lower = url.lower()
+    evergreen_patterns = (
+        "/privacy", "/terms", "/tos", "/legal", "/policy", "/policies",
+        "/imprint", "/compliance", "/security", "/cookie", "/gdpr",
+        "/accessibility", "/about", "/contact", "/disclaimer"
+    )
+    return any(p in lower for p in evergreen_patterns)
+
+
 def _check_sf007_sf008(
     frontier: list[str],
     page_results: dict[str, PageResult],
 ) -> list[dict]:
-    """SF-007 (medium): Stale content. SF-008 (medium): Duplicate titles/descriptions."""
+    """SF-007 (medium/low): Stale content. SF-008 (medium): Duplicate titles/descriptions."""
     findings: list[dict] = []
     try:
         now = datetime.now(timezone.utc)
         stale_cutoff = now - timedelta(days=STALE_DAYS)
         warn_cutoff = now - timedelta(days=MAX_AGE_DAYS)
-        stale_pages: list[str] = []
+        stale_editorial_pages: list[str] = []
+        stale_general_pages: list[str] = []
         no_freshness: list[str] = []
         titles: Counter[str] = Counter()
         descriptions: Counter[str] = Counter()
@@ -663,11 +688,30 @@ def _check_sf007_sf008(
                 if lm:
                     freshness_date = _parse_http_date(lm)
 
+            # Check if page is editorial vs evergreen
+            is_evergreen = _is_evergreen_url(url)
+            has_article_schema = False
+            for block in blocks:
+                if not block.get("_parse_error"):
+                    b_types = [t.lower() for t in _get_types(block)]
+                    if any(t in ("article", "newsarticle", "blogposting", "techarticle") for t in b_types):
+                        has_article_schema = True
+                        break
+
+            is_editorial = has_article_schema or any(
+                seg in url.lower() for seg in ("/blog", "/news", "/article", "/posts", "/updates", "/releases")
+            )
+
             if freshness_date:
                 if freshness_date < stale_cutoff:
-                    stale_pages.append(url)
+                    if is_editorial:
+                        stale_editorial_pages.append(url)
+                    elif not is_evergreen:
+                        stale_general_pages.append(url)
+                    # Evergreen policy/legal/contact pages without article schema have defensible longevity
             else:
-                no_freshness.append(url)
+                if not is_evergreen:
+                    no_freshness.append(url)
 
             # --- Titles / Descriptions (SF-008) ---
             title_tag = pr.soup.find("title")
@@ -683,16 +727,17 @@ def _check_sf007_sf008(
                 desc_map.setdefault(desc_text, []).append(url)
 
         # SF-007 findings
-        if stale_pages:
+        all_stale = stale_editorial_pages + stale_general_pages
+        if all_stale:
             findings.append(_finding(
                 "SF-007",
                 "Pages with stale content metadata",
                 "medium",
-                f"{len(stale_pages)} page(s) have content dated older than "
-                f"{STALE_DAYS} days: " + "; ".join(sorted(stale_pages)[:5]),
+                f"[{EvidenceState.CONFIRMED.value}] {len(all_stale)} page(s) have content dated older than "
+                f"{STALE_DAYS} days: " + "; ".join(sorted(all_stale)[:5]),
                 "Update content freshness signals (dateModified in JSON-LD, "
                 "Last-Modified header, or meta tags) when content is revised.",
-                pages_affected=len(stale_pages),
+                pages_affected=len(all_stale),
                 pages_checked=len(html_pages),
             ))
 
@@ -701,7 +746,7 @@ def _check_sf007_sf008(
                 "SF-007",
                 "Pages missing freshness metadata",
                 "low",
-                f"{len(no_freshness)}/{len(html_pages)} pages lack any date "
+                f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] {len(no_freshness)}/{len(html_pages)} pages lack any date "
                 "signal (dateModified, Last-Modified, etc.).",
                 "Add datePublished and dateModified properties to JSON-LD "
                 "structured data or use <meta> property tags.",
@@ -869,7 +914,7 @@ def _check_rendered_jsonld(
             "SF-001",
             "Dynamic JSON-LD structured data detected post-rendering",
             "medium",
-            f"Schema types ({types_str}) appear exclusively in post-JS rendered DOM across "
+            f"[{EvidenceState.CONFIRMED.value}] Schema types ({types_str}) appear exclusively in post-JS rendered DOM across "
             f"{len(rendered_only_pages)} page(s): " + "; ".join(sorted(rendered_only_pages)[:3]) +
             ". Non-JS AI crawlers cannot discover these structured entities.",
             "Pre-render or serve JSON-LD schema in initial server-side HTML responses "
