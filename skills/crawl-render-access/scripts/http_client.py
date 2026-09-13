@@ -683,7 +683,7 @@ import hashlib as _hashlib
 # Title patterns that are strongly associated with challenge/interstitial pages.
 # These are generic behavioral terms, not vendor names.
 _CHALLENGE_TITLE_RE = re.compile(
-    r"^\s*(?:checking|challenge|security\s+check|please\s+wait|attention\s+required|"
+    r"^\s*(?:checking|(?:client\s+)?challenge|security\s+check|please\s+wait|attention\s+required|"
     r"ddos\s+protection|verif(?:y|ying|ication)|access\s+denied|one\s+more\s+step|"
     r"just\s+a\s+moment|human\s+verification|bot\s+check|browser\s+check|"
     r"are\s+you\s+a\s+(?:human|robot)|captcha|loading|enable\s+javascript|"
@@ -807,7 +807,7 @@ def detect_challenge_page(
             signals.append("no_semantic_elements_raw")
 
     # ── Signal 5: Challenge body content match ────────────────────────────────
-    if _CHALLENGE_BODY_RE.search(visible_text or html_lower):
+    if _CHALLENGE_BODY_RE.search(visible_text) or _CHALLENGE_BODY_RE.search(html_lower):
         signals.append("challenge_body_text_pattern")
 
     # ── Signal 6: Noscript-only meaningful content (JS-gate pattern) ─────────

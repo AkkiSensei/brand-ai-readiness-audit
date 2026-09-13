@@ -37,6 +37,7 @@ from http_client import (
 )
 import aggregate
 import crawl_audit
+from schema_validate import validate_report
 
 
 class FixtureServer:
@@ -368,6 +369,49 @@ def test_7_browser_reuse_multipage(server: FixtureServer) -> None:
     assert launch_count == 1, f"Expected 1 browser launch across {len(urls)} pages, got {launch_count}"
     renderer.close()
     print("PASS: Item 7 (Single browser process reused across all pages)")
+
+
+def test_8_playwright_unavailable_pipeline_degradation(server: FixtureServer) -> None:
+    """Item 8: Verify pipeline transparently communicates reduced render confidence when Playwright is unavailable."""
+    print("\n--- TEST 8: PIPELINE PLAYWRIGHT DEGRADATION TRANSPARENCY ---")
+    url = f"http://127.0.0.1:{server.port}/6_js_rendered.html"
+
+    # Degraded renderer simulating Playwright unavailable / uninstalled
+    degraded_renderer = PlaywrightRenderer(allow_private_ips=True)
+    degraded_renderer._available = False
+
+    report = aggregate.run_audit(
+        target_url=url,
+        max_pages=1,
+        render_js=True,
+        allow_private_ips=True,
+        renderer=degraded_renderer,
+    )
+
+    # 1. Audit must complete gracefully without crash
+    assert report.get("audit_status") == "completed", f"Expected completed status, got {report.get('audit_status')}"
+
+    # 2. Coverage MUST explicitly communicate reduced render confidence
+    cov = report.get("coverage", {})
+    assert cov.get("render_confidence") == "low", f"Expected render_confidence='low', got {cov.get('render_confidence')}"
+    cra_cov = cov.get("crawl_render_access", {})
+    assert cra_cov.get("render_confidence") == "low"
+    assert cra_cov.get("coverage_state") in ("LIMITED", "PARTIAL")
+
+    # 3. Notes must explain the degradation reason honestly
+    notes = cra_cov.get("notes", "")
+    assert "Browser rendering unavailable" in notes or "Playwright not installed" in notes, (
+        f"Expected degradation reason in notes, got: {notes}"
+    )
+
+    # 4. Must NOT pretend JS was rendered
+    assert report.get("rendered_word_count") is None, "Must not pretend JS rendered when Playwright unavailable"
+    assert report.get("performance_metrics") is None, "Performance metrics should be None when unrendered"
+
+    # 5. Report schema validity
+    valid, errors = validate_report(report)
+    assert valid, f"Degraded report must remain 100% schema valid: {errors}"
+    print("PASS: Item 8 (Playwright degradation transparently reflected in coverage with schema validity)")
 
 
 def run_all():

@@ -34,7 +34,15 @@
     ]
   },
 
+  "challenge": {
+    "min_corroborating_signals": 3,
+    "min_corroborating_signals_$comment": "Requires at least 3 distinct behavioral signals (title regex, script dominance, low content density, form structure, noscript dominance, zero links) plus mandatory challenge anchor (title/body/hidden token form/noscript dominance) to classify HTTP-200 as UNUSABLE_CHALLENGE. Prevents false positives on normal sparse pages or SPA shells.",
+    "cluster_min_size": 3,
+    "cluster_min_size_$comment": "Minimum count of distinct requested URLs returning identical visible-text SHA-256 fingerprints to identify unknown-vendor WAF/challenge shells clustering across the site regardless of URL requested."
+  },
+
   "render": {
+    "text_blanking_ratio_threshold_$comment": "Ratio of static HTML text length to post-render DOM text length (CR-003). Values < 0.15 indicate severe CSR blanking where >= 85% of primary text is invisible to non-JS crawlers.",
     "text_blanking_ratio_threshold": 0.15,
     "csr_text_ratio_warning_$comment": "Set to 0.30 (not 0.50) to prevent false-positive CR-004 warnings on markup-heavy static/legacy pages (e.g. 3_legacy.html fixture with text ratio ~0.44 has zero CSR, but would trigger under 0.50). 0.30 cleanly isolates real SPA shells like 1_spa.html (ratio 0.02).",
     "csr_text_ratio_warning": 0.30,
@@ -77,6 +85,7 @@
   },
 
   "entity": {
+    "nap_consistency_min_ratio_$comment": "Minimum acceptable token/character consistency ratio across pages for Name, Address, and Phone (TC-002). Below 0.80 flags conflicting entity declarations.",
     "nap_consistency_min_ratio": 0.80,
     "sameas_min_external_links": 1,
     "max_claim_verification_urls": 3,
@@ -88,6 +97,7 @@
   },
 
   "engagement": {
+    "overlay_coverage_threshold_$comment": "Viewport area threshold (ER-006). Fixed/sticky overlay elements covering >= 60% of viewport area block crawler view of primary body text.",
     "overlay_coverage_threshold": 0.60,
     "above_fold_h1_required": true,
     "nav_links_min_count": 3,
@@ -97,6 +107,7 @@
     "viewport_stable_wait_ms": 1500,
     "broken_link_sample_size": 25,
     "broken_link_ratio_threshold": 0.05,
+    "search_page_threshold_$comment": "Pages with >= 30 links or search query forms are classified as search/listing pages (ER-005), exempt from single-CTA conversion heuristics.",
     "search_page_threshold": 30,
     "breadcrumb_min_depth": 2
   },

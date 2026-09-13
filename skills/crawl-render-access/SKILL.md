@@ -76,10 +76,18 @@ a `SkillCoverage` dict.
 | `CR-007` | Excessive Crawl-delay in robots.txt | low | Crawl-delay > 10 seconds |
 | `CR-008` | Public pages marked with noindex directive | high | Meta robots or X-Robots-Tag specifies noindex |
 
+## Heuristic Thresholds
+
+All thresholds are centralized in `skills/audit-orchestrator/references/thresholds.json`:
+
+- **CR-003 Severe CSR (`text_blanking_ratio_critical = 0.15`)**: Triggered when raw HTML body text is <15% of rendered DOM text or static word count is under 50 words, indicating core page content is completely invisible to non-JS crawlers.
+- **CR-004 Moderate CSR (`text_blanking_ratio_warning = 0.30`)**: Triggered when raw HTML body text is between 15% and 30% of rendered DOM text, signaling client-side hydration dependency for secondary content.
+- **Anti-Bot / Challenge Detection (`min_signals = 3`, `cluster_size = 3`)**: Requires at least 3 distinct challenge signatures (status codes, security challenge titles, captcha scripts) clustered across at least 3 pages before flagging an entire domain, preventing false positives on single-page security gates or developer hubs.
+
 ## References
 
 - `scripts/http_client.py`         — Shared HTTP & Playwright client.
 - `scripts/crawl_audit.py`         — Main crawl audit runner (Step 2).
-- `references/`                    — Mirrors thresholds.json symlink.
+- `references/`                    — Centralized thresholds in `references/thresholds.json`.
 - [Google robots.txt spec](https://developers.google.com/search/docs/crawling-indexing/robots/intro)
 - [Sitemaps protocol](https://www.sitemaps.org/protocol.html)

@@ -928,11 +928,21 @@ def _build_coverage(
             if errors_list:
                 cov_entry["notes"] = "; ".join(str(e) for e in errors_list[:3])
             elif low_conf_count > 0:
-                pct = round((low_conf_count / total_pages) * 100)
-                cov_entry["notes"] = (
-                    f"{low_conf_count} of {total_pages} page(s) ({pct}%) had low render confidence "
-                    "(text blanking detected without successful JS render)."
-                )
+                render_errors = [
+                    pr.render_error for pr in page_results.values()
+                    if getattr(pr, "render_error", None)
+                ]
+                if render_errors:
+                    cov_entry["notes"] = (
+                        f"Browser rendering unavailable ({render_errors[0]}); "
+                        f"{low_conf_count} page(s) evaluated on static HTML fallback with low render confidence."
+                    )
+                else:
+                    pct = round((low_conf_count / total_pages) * 100)
+                    cov_entry["notes"] = (
+                        f"{low_conf_count} of {total_pages} page(s) ({pct}%) had low render confidence "
+                        "(text blanking detected without successful JS render)."
+                    )
             coverage[schema_key] = cov_entry
         else:
             pages_checked = result.get("pages_analyzed", 0)
@@ -1091,12 +1101,36 @@ def _build_proactive_strings(
 # REMEDIATION THEMES (Lightweight grouping by action & target asset)
 # ===================================================================
 
+# Deterministic architectural priority for remediation themes:
+# Foundational crawl & render access blockers precede downstream structured data/entity
+# extraction, which in turn precede secondary page layout & engagement enhancements.
+_THEME_ARCHITECTURAL_PRIORITY: dict[str, int] = {
+    # Tier 1: Fundamental Crawl, Render & Access Governance (Prerequisites for all indexing)
+    "Crawler Access Governance": 10,
+    "Render Architecture": 20,
+    "Paywall & Overlay Governance": 30,
+    "Sitemap & Crawler Guidance": 40,
+    "Crawl Budget & Link Health": 50,
+    # Tier 2: Machine-Readable Entity & Knowledge Graph Extraction
+    "Structured Entity Schema": 60,
+    "Machine-Readable Fact Extraction": 70,
+    "External Entity Corroboration": 80,
+    "Page Disambiguation & Metadata": 90,
+    "Content Freshness Signals": 100,
+    # Tier 3: Secondary Document & Engagement Structure
+    "Semantic Document Hierarchy": 110,
+    "Content Orientation & Conversion": 120,
+    "Mobile & Responsive Accessibility": 130,
+    "AI Agent Protocol Adoption": 140,
+}
+
+
 def _build_remediation_themes(findings: list[dict]) -> list[dict]:
     """Group findings into deterministic remediation themes sharing common actions/assets.
 
     No causal graph is created; original findings remain unhidden.
     Priority reflects highest finding severity/action priority in the theme.
-    Ordering is deterministic: priority descending, then theme name ascending.
+    Ordering is deterministic: priority descending, architectural dependency tier, then theme name ascending.
     """
     if not findings:
         return []
@@ -1145,7 +1179,12 @@ def _build_remediation_themes(findings: list[dict]) -> list[dict]:
             "priority": highest_prio,
         })
 
-    themes.sort(key=lambda t: (_SEVERITY_ORDER.index(t["priority"]), t["theme"]))
+    def _theme_sort_key(t: dict) -> tuple:
+        prio_idx = _SEVERITY_ORDER.index(t["priority"]) if t["priority"] in _SEVERITY_ORDER else 99
+        arch_prio = _THEME_ARCHITECTURAL_PRIORITY.get(t["theme"], 200)
+        return (prio_idx, arch_prio, t["theme"])
+
+    themes.sort(key=_theme_sort_key)
     return themes
 
 

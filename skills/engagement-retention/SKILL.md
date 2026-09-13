@@ -85,9 +85,18 @@ Returns a `dict` with:
 | `ER-007` | Viewport meta restricts user zoom | medium | Viewport specifies `user-scalable=no` or `maximum-scale=1` |
 | `ER-008` | No site search functionality detected on large site | low | Site with >30 crawled pages lacks search input or SearchAction schema |
 
+## Heuristic Thresholds
+
+All thresholds are centralized in `skills/audit-orchestrator/references/thresholds.json`:
+
+- **ER-003 Interstitial Overlay (`overlay_coverage_threshold = 0.60`)**: Triggered when a fixed/absolute modal or backdrop obscures >=60% of viewport area, distinguishing blocking modal interstitials from non-blocking top/bottom alert banners.
+- **ER-008 Site Search Functionality (`site_search_min_pages = 30`)**: Only evaluated on sites with >30 crawled pages, preventing false-positive penalties on lean or single-purpose landing sites.
+- **Call-to-Action (CTA) Detection**: Evaluates semantic interactive elements (`<button>`, `<a>`, `<input type="submit">`) containing high-intent conversion verbs (e.g. `buy`, `subscribe`, `start`, `contact`, `download`) to confirm AI-recommended user next steps exist.
+
 ## References
 
 - `scripts/er_audit.py` — Engagement & retention runner (Step 2).
 - `scripts/http_client.py` — Shared HTTP & Playwright client.
+- `skills/audit-orchestrator/references/thresholds.json` — Centralized heuristic thresholds.
 - [Core Web Vitals — CLS](https://web.dev/cls/)
 - [Google interstitial guidelines](https://developers.google.com/search/blog/2016/08/helping-users-easily-access-content-on)

@@ -82,8 +82,16 @@ Returns a `dict` with:
 | `TC-006` | Organization schema missing disambiguation properties | medium | Organization schema lacks `legalName`, `description`, or identifier |
 | `TC-006` | No Organization schema found for entity disambiguation | medium | Zero Organization JSON-LD found for brand disambiguation |
 
+## Heuristic Thresholds
+
+All thresholds are centralized in `skills/audit-orchestrator/references/thresholds.json`:
+
+- **TC-002 NAP Consistency (`nap_consistency_threshold = 0.80`)**: Triggered when name, address, or phone number strings appear consistently across less than 80% of crawl pages, tolerating incidental formatting variations while catching true cross-page entity fragmentation.
+- **TC-004 Brand Name Variations (`brand_name_max_variants = 2`)**: Permitted up to 2 distinct capitalization/naming variants (e.g. trading name vs. legal entity); flags TC-004 if >2 variants create ambiguity for AI knowledge graphs.
+
 ## References
 
 - `scripts/tec_audit.py` — Trust & entity corroboration runner (Step 2).
+- `skills/audit-orchestrator/references/thresholds.json` — Centralized heuristic thresholds.
 - [Schema.org sameAs](https://schema.org/sameAs)
 - [Google Entity disambiguation](https://developers.google.com/search/docs/appearance/structured-data/organization)
