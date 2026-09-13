@@ -2216,3 +2216,38 @@ def is_same_origin(url_a: str, url_b: str) -> bool:
         )
     except Exception:
         return False
+
+
+_AUTH_OR_UTILITY_PATTERNS = re.compile(
+    r"(?:^|/)(?:login|signin|sign-in|signup|sign-up|register|auth|oauth|sso|openid|"
+    r"account|my-account|profile|cart|checkout|basket|order-status|"
+    r"forgot-password|reset-password|password/reset|verify|session|logout)(?:[/?#]|$)",
+    re.IGNORECASE,
+)
+
+
+def is_auth_or_utility_url(url: str, soup: Optional[BeautifulSoup] = None) -> bool:
+    """Return True if the URL or DOM represents an authentication, session, or utility page.
+
+    Such pages intentionally lack general site navigation, have minimal editorial text,
+    and frequently redirect unauthenticated requests or are disallowed in robots.txt.
+    """
+    if not url:
+        return False
+    try:
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path.lower()
+        query = parsed.query.lower()
+        if _AUTH_OR_UTILITY_PATTERNS.search(path):
+            return True
+        if any(term in query for term in ("openid", "signin", "login", "oauth", "redirect_to")):
+            return True
+        if soup is not None:
+            # Check for password input or auth forms
+            if soup.find("input", attrs={"type": re.compile(r"^password$", re.I)}):
+                return True
+            if soup.find("form", attrs={"action": re.compile(r"login|signin|auth", re.I)}):
+                return True
+    except Exception:
+        pass
+    return False

@@ -34,6 +34,7 @@ from http_client import (
     PageResult,
     normalise_url,
     is_same_origin,
+    is_auth_or_utility_url,
     EvidenceState,
 )
 
@@ -83,12 +84,19 @@ _OVERLAY_CLASS_RE = re.compile(
 _FIXED_STYLE_RE = re.compile(
     r"position\s*:\s*(fixed|sticky)", re.IGNORECASE
 )
-_FULLSCREEN_RE = re.compile(
-    r"(width\s*:\s*100\s*(%|vw)|height\s*:\s*100\s*(%|vh)|inset\s*:\s*0)",
-    re.IGNORECASE,
+_FULL_VIEWPORT_RE = re.compile(
+    r"(?:inset\s*:\s*0|"
+    r"(?:top\s*:\s*0.*?bottom\s*:\s*0)|"
+    r"(?:width\s*:\s*100(?:%|vw).*?height\s*:\s*100(?:%|vh))|"
+    r"(?:height\s*:\s*100(?:%|vh).*?width\s*:\s*100(?:%|vw)))",
+    re.IGNORECASE | re.DOTALL,
 )
+_EXCLUDE_NAV_TAGS = {"header", "nav", "footer", "main"}
+_EXCLUDE_NAV_CLASSES = re.compile(r"header|navbar|nav|menu|topbar|toolbar|cookie|consent|banner|breadcrumb", re.I)
+
 _CTA_RE = re.compile(
     r"(buy|shop|order|subscribe|sign\s*up|get\s+started|try\s+free|"
+    r"choose|select|purchase|plans|pricing|trial|upgrade|continue|explore|view|"
     r"add\s+to\s+cart|book\s+now|contact\s+us|learn\s+more|"
     r"request\s+a?\s*demo|start\s+free|download|enroll)",
     re.IGNORECASE,
@@ -244,33 +252,30 @@ def _check_er001(
                 if all_hidden:
                     missing_h1.append(url)
 
-            # Navigation check
-            nav_tags = pr.soup.find_all("nav")
-            has_nav = False
-            for nav in nav_tags:
-                links = nav.find_all("a")
-                if len(links) >= NAV_MIN_LINKS:
-                    has_nav = True
-                    break
-
-            # Fallback: check for header with links
-            if not has_nav:
-                for header in pr.soup.find_all("header"):
-                    links = header.find_all("a")
+            # Navigation check (skip auth/utility pages which intentionally lack global site navigation)
+            if not is_auth_or_utility_url(url, pr.soup):
+                has_nav = False
+                for container in pr.soup.find_all(["nav", "header"]):
+                    links = [
+                        el for el in container.find_all(["a", "button"])
+                        if el.get_text(strip=True) or el.get("aria-label") or el.get("title")
+                    ]
                     if len(links) >= NAV_MIN_LINKS:
                         has_nav = True
                         break
 
-            # Fallback: role="navigation"
-            if not has_nav:
-                for role_nav in pr.soup.find_all(attrs={"role": "navigation"}):
-                    links = role_nav.find_all("a")
-                    if len(links) >= NAV_MIN_LINKS:
-                        has_nav = True
-                        break
+                if not has_nav:
+                    for role_nav in pr.soup.find_all(attrs={"role": re.compile(r"^(?:navigation|banner|menubar)$", re.I)}):
+                        links = [
+                            el for el in role_nav.find_all(["a", "button"])
+                            if el.get_text(strip=True) or el.get("aria-label") or el.get("title")
+                        ]
+                        if len(links) >= NAV_MIN_LINKS:
+                            has_nav = True
+                            break
 
-            if not has_nav:
-                missing_nav.append(url)
+                if not has_nav:
+                    missing_nav.append(url)
 
         if missing_h1:
             findings.append(_finding(
@@ -336,6 +341,8 @@ def _check_er002(
 
             pr = page_results.get(url)
             if not pr or not pr.soup or not _is_html_page(pr):
+                continue
+            if is_auth_or_utility_url(url, pr.soup):
                 continue
 
             has_breadcrumb = False
@@ -405,24 +412,37 @@ def _check_er003(
             pr = page_results.get(url)
             if not pr or not pr.soup or not _is_html_page(pr):
                 continue
+            if is_auth_or_utility_url(url, pr.soup):
+                continue
 
             for elem in pr.soup.find_all(True):
+                if elem.name in _EXCLUDE_NAV_TAGS:
+                    continue
+
                 classes = " ".join(elem.get("class", [])).lower()
                 elem_id = (elem.get("id") or "").lower()
                 style = (elem.get("style") or "").lower()
                 combined_attrs = f"{classes} {elem_id}"
 
+                # Skip elements hidden via inline style
+                if "display:none" in style.replace(" ", "") or "visibility:hidden" in style.replace(" ", ""):
+                    continue
+
                 # Cookie / GDPR banners — only flag if intrusive full-screen blocking overlay
                 if re.search(r"cookie|gdpr|cc[-_]?banner|consent", combined_attrs):
                     is_fixed = bool(_FIXED_STYLE_RE.search(style))
-                    is_full = bool(_FULLSCREEN_RE.search(style))
+                    is_full = bool(_FULL_VIEWPORT_RE.search(style))
                     high_z = False
                     z_match = re.search(r"z-index\s*:\s*(\d+)", style)
                     if z_match:
                         high_z = int(z_match.group(1)) > Z_INDEX_THRESH
-                    if is_full or (is_fixed and high_z and ("height: 100%" in style or "height:100%" in style or "inset: 0" in style)):
+                    if is_full and is_fixed and high_z:
                         if url not in cookie_pages:
                             cookie_pages.append(url)
+                    continue
+
+                # Exclude navigation regions, headers, and breadcrumbs from overlay classification
+                if _EXCLUDE_NAV_CLASSES.search(combined_attrs):
                     continue
 
                 # Newsletter modals
@@ -431,22 +451,22 @@ def _check_er003(
                         newsletter_pages.append(url)
                     continue
 
-                # Full-page overlays
+                # Full-page overlays: require fixed positioning, high z-index, and true full viewport coverage
                 is_fixed = bool(_FIXED_STYLE_RE.search(style))
-                is_full = bool(_FULLSCREEN_RE.search(style))
+                is_full = bool(_FULL_VIEWPORT_RE.search(style))
                 high_z = False
                 z_match = re.search(r"z-index\s*:\s*(\d+)", style)
                 if z_match:
                     high_z = int(z_match.group(1)) > Z_INDEX_THRESH
 
-                if is_fixed and (is_full or high_z):
+                if is_fixed and high_z and is_full:
                     if url not in overlay_pages:
                         overlay_pages.append(url)
                     continue
 
-                # Class-based overlay detection
+                # Class-based overlay detection: must also have fixed positioning and full viewport coverage
                 if _OVERLAY_CLASS_RE.search(combined_attrs):
-                    if is_fixed or high_z:
+                    if is_fixed and is_full and high_z:
                         if url not in overlay_pages:
                             overlay_pages.append(url)
 
@@ -642,22 +662,29 @@ def _check_er005(
                         is_product_like = True
                         break
 
-            if not is_product_like:
+            if is_auth_or_utility_url(url, pr.soup):
                 continue
+            if any(seg in lower for seg in ("/endorsements", "/testimonials", "/reviews", "/case-studies", "/stories")):
+                continue
+
             product_pages.append(url)
 
             # Check for CTA elements
             has_cta = False
-            for tag in pr.soup.find_all(["a", "button"]):
+            for tag in pr.soup.find_all(["a", "button", "input"]):
                 text = tag.get_text(strip=True)
-                if _CTA_RE.search(text):
+                val = (tag.get("value", "") if tag.name == "input" else "") or ""
+                aria = tag.get("aria-label", "") or tag.get("title", "") or ""
+                combined_cta_text = f"{text} {val} {aria}".strip()
+                if _CTA_RE.search(combined_cta_text):
                     has_cta = True
                     break
-                # Check aria-label
-                aria = tag.get("aria-label", "")
-                if _CTA_RE.search(aria):
-                    has_cta = True
-                    break
+                role = (tag.get("role") or "").lower()
+                classes = " ".join(tag.get("class", [])).lower()
+                if role == "button" or re.search(r"\b(?:btn|button|cta)\b", classes):
+                    if len(combined_cta_text) > 0:
+                        has_cta = True
+                        break
 
             if not has_cta:
                 pages_without_cta.append(url)

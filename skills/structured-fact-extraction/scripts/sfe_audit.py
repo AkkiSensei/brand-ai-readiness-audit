@@ -29,7 +29,7 @@ _SCRIPTS_DIR = (
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from http_client import HttpClient, PageResult, normalise_url, EvidenceState
+from http_client import HttpClient, PageResult, normalise_url, is_auth_or_utility_url, EvidenceState
 
 logger = logging.getLogger(__name__)
 
@@ -313,7 +313,7 @@ def _check_sf001_sf002(
             "SF-001",
             "No JSON-LD structured data found on any page",
             "high",
-            f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] Scanned {len(valid_pages)} page(s); zero contained "
+            f"[{EvidenceState.CONFIRMED.value}] Scanned {len(valid_pages)} page(s); zero contained "
             "application/ld+json script blocks.",
             "Add Schema.org JSON-LD markup to at least the homepage "
             "(Organization), product pages (Product), and article pages "
@@ -459,13 +459,13 @@ def _check_sf003_sf004(
             findings.append(_finding(
                 "SF-003",
                 "Key facts trapped in images without text alternatives",
-                "critical",
+                "medium",
                 f"{len(img_fact_pages)} page(s) contain pricing, contact info, "
                 "or other key facts only in image alt text or in images lacking "
                 "alt text: " + "; ".join(sorted(img_fact_pages)[:5]),
-                "Extract key facts (prices, phone numbers, addresses, spec "
-                "tables) from images into visible HTML text or structured data. "
-                "Ensure all informational images have descriptive alt text.",
+                "Extract key facts (pricing, specifications, contact details) into "
+                "visible HTML text or structured Schema.org markup. AI search engines "
+                "prioritize machine-readable text over raster graphics for factual citation.",
                 related=["SF-004"],
             ))
 
@@ -476,9 +476,9 @@ def _check_sf003_sf004(
                 "medium",
                 f"{len(canvas_pages)} page(s) use <canvas> without fallback "
                 "text or aria-label: " + "; ".join(sorted(canvas_pages)[:5]),
-                "Add fallback text content inside <canvas> tags and use "
-                "aria-label for accessibility. AI crawlers cannot parse canvas "
-                "rendered content.",
+                "Add fallback semantic text content inside <canvas> tags or provide "
+                "aria-label/table equivalents. HTML5 canvas elements render bitmap pixels "
+                "that are opaque to DOM-based text indexers unless fallback markup is supplied.",
             ))
 
         if video_no_track:
@@ -489,8 +489,9 @@ def _check_sf003_sf004(
                 f"{len(video_no_track)} page(s) have <video> elements "
                 "without <track> subtitles/captions: "
                 + "; ".join(sorted(video_no_track)[:5]),
-                "Add WebVTT caption tracks to all video elements. AI engines "
-                "cannot extract spoken content from video files.",
+                "Add WebVTT caption tracks (<track kind='captions'>) to video elements. "
+                "Web crawlers do not execute audio transcription during text indexing; "
+                "caption tracks make spoken dialogue immediately indexable.",
                 related=["SF-003"],
             ))
 
@@ -504,7 +505,7 @@ def _check_sf005(
     page_results: dict[str, PageResult],
     http_client: HttpClient,
 ) -> list[dict]:
-    """SF-005 (high): Linked PDFs without text alternatives."""
+    """SF-005 (medium): Linked PDFs without text alternatives."""
     findings: list[dict] = []
     try:
         pdf_links: list[str] = []
@@ -544,13 +545,13 @@ def _check_sf005(
                 findings.append(_finding(
                     "SF-005",
                     "PDFs linked without HTML text alternative content",
-                    "high",
+                    "medium",
                     f"{len(orphan_pdfs)} PDF(s) are linked with minimal anchor "
                     "text, suggesting content is trapped in the PDF without an "
                     "HTML text equivalent: " + "; ".join(sorted(orphan_pdfs)[:5]),
-                    "Create HTML landing pages summarising each PDF's key "
-                    "content. Add descriptive anchor text. AI crawlers cannot "
-                    "reliably parse PDF content for citation.",
+                    "Provide HTML summaries and descriptive anchor text for linked PDF resources. "
+                    "AI search engines prioritize semantic HTML over binary PDFs, as PDFs lack semantic "
+                    "DOM hierarchy, fragment identifiers, and schema markup required for reliable citation anchoring.",
                 ))
 
     except Exception as exc:
@@ -702,15 +703,24 @@ def _check_sf007_sf008(
                 seg in url.lower() for seg in ("/blog", "/news", "/article", "/posts", "/updates", "/releases")
             )
 
+            # Identify pages where freshness metadata is not applicable
+            homepage_url = frontier[0] if frontier else ""
+            is_home = is_homepage(url, homepage_url)
+            is_pricing = any(seg in url.lower() for seg in ("/pricing", "/plans"))
+            is_auth_or_util = is_auth_or_utility_url(url, pr.soup)
+            skip_freshness = is_home or is_pricing or is_auth_or_util or is_evergreen
+
             if freshness_date:
                 if freshness_date < stale_cutoff:
                     if is_editorial:
                         stale_editorial_pages.append(url)
-                    elif not is_evergreen:
+                    elif not skip_freshness:
                         stale_general_pages.append(url)
                     # Evergreen policy/legal/contact pages without article schema have defensible longevity
             else:
-                if not is_evergreen:
+                # Absence of freshness dates is an adverse outcome only for content pages,
+                # not static brand homepages, pricing tables, or auth/utility endpoints.
+                if not skip_freshness:
                     no_freshness.append(url)
 
             # --- Titles / Descriptions (SF-008) ---
@@ -747,7 +757,7 @@ def _check_sf007_sf008(
                 "Pages missing freshness metadata",
                 "low",
                 f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] {len(no_freshness)}/{len(html_pages)} pages lack any date "
-                "signal (dateModified, Last-Modified, etc.).",
+                "signal (dateModified, Last-Modified, etc.): " + "; ".join(sorted(no_freshness)[:5]),
                 "Add datePublished and dateModified properties to JSON-LD "
                 "structured data or use <meta> property tags.",
                 related=["SF-002"],

@@ -4,7 +4,7 @@ version: 1.0.0
 description: >
   Domain sub-skill that validates Schema.org JSON-LD structured data markup,
   detects factual content trapped inside images, canvas elements, or PDFs
-  that AI crawlers cannot read, and inspects document freshness metadata.
+  without machine-readable HTML text alternatives, and inspects document freshness metadata.
 entrypoint: false
 tags:
   - schema.org

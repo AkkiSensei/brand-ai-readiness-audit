@@ -172,14 +172,14 @@ _FINDING_REMEDIATION_METADATA: dict[str, dict[str, str]] = {
         "theme": "Machine-Readable Fact Extraction",
         "asset_type": "Semantic HTML Text",
         "location": "Canvas elements and infographic containers",
-        "why_it_matters": "HTML5 <canvas> elements are opaque bitmaps to AI crawlers unless backed by structured text fallbacks or ARIA labels.",
+        "why_it_matters": "HTML5 <canvas> elements render bitmap pixels that are opaque to DOM-based text indexers unless backed by structured text fallbacks or ARIA labels.",
         "default_action": "Provide accessible semantic HTML text fallbacks or structured JSON-LD data for all metrics rendered within canvas elements.",
     },
     "SF-005": {
         "theme": "Machine-Readable Fact Extraction",
         "asset_type": "HTML Landing Pages",
         "location": "Document download links and resource libraries",
-        "why_it_matters": "AI crawlers frequently deprioritize or skip binary PDF downloads; content trapped in PDFs without HTML summaries rarely earns direct attribution.",
+        "why_it_matters": "Directly linked PDFs lack semantic DOM hierarchy, fragment identifiers, and schema markup required for reliable citation anchoring by AI engines.",
         "default_action": "Create HTML summary pages with descriptive anchor text covering the key insights and data contained in linked PDF reports.",
     },
     "SF-006": {
@@ -559,9 +559,11 @@ def _normalise_finding(raw: Any, domain_name: str, target_url: str) -> dict:
         prio_str = severity
 
     # Prioritization check (Phase 6D):
-    # Ensure priority reflects evidence strength:
+    # Ensure severity and priority reflect evidence strength:
     ev_str = str(evidence)
     if "[INSUFFICIENT_EVIDENCE]" in ev_str or "[NOT_OBSERVABLE]" in ev_str:
+        if severity in ("critical", "high"):
+            severity = "medium"
         if prio_str in ("critical", "high"):
             prio_str = "medium"
 
@@ -624,10 +626,30 @@ def _dedup_key(finding: dict) -> str:
 
 
 def _deduplicate(findings: list[dict]) -> list[dict]:
-    """Remove duplicate findings, keeping the first occurrence."""
+    """Remove duplicate findings and resolve cross-skill semantic overlaps."""
+    # Check if SF-001 fired for missing Organization schema or missing JSON-LD
+    sf001_missing_org = any(
+        f.get("_local_id") == "SF-001" and ("organization" in f.get("title", "").lower() or "no json-ld" in f.get("title", "").lower())
+        for f in findings
+    )
+    has_tc001 = any(f.get("_local_id") == "TC-001" for f in findings)
+
     seen: set[str] = set()
     result: list[dict] = []
     for f in findings:
+        lid = f.get("_local_id", "")
+        # Semantic suppression: if SF-001 already reported missing Organization/JSON-LD,
+        # suppress duplicate TC-006 findings reporting missing Organization schema.
+        if lid == "TC-006" and sf001_missing_org and "no organization" in f.get("title", "").lower():
+            continue
+
+        # Harmonize overlapping TC-001 and TC-004: if TC-001 already covers missing external links,
+        # calibrate TC-004 severity to medium to prevent severity inflation
+        if lid == "TC-004" and has_tc001 and f.get("severity") == "critical":
+            f["severity"] = "medium"
+            if isinstance(f.get("suggested_action"), dict):
+                f["suggested_action"]["priority"] = "medium"
+
         key = _dedup_key(f)
         if key in seen:
             continue

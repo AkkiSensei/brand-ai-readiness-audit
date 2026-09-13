@@ -52,6 +52,7 @@ from http_client import (
     extract_text_ratio,
     normalise_url,
     is_same_origin,
+    is_auth_or_utility_url,
     EvidenceState,
 )
 
@@ -566,13 +567,26 @@ def _check_cr002(
             if is_waf:
                 waf_urls.append(f"{url} ({pr.status_code}: {signature})")
             elif pr.status_code is not None and pr.status_code not in (200, 301):
-                bad_codes.append(f"{url} -> {pr.status_code}")
+                # 302/307/308 are standard temporary/permanent redirects and are evaluated via redirect_chain
+                if pr.status_code in (302, 307, 308) and pr.redirect_chain:
+                    pass
+                else:
+                    # Exclude login/auth endpoints from being reported as broken public pages unless 5xx server crash
+                    if not (is_auth_or_utility_url(url) and pr.status_code in (401, 403, 302, 307)):
+                        bad_codes.append(f"{url} -> {pr.status_code}")
             elif pr.status_code is None and pr.error:
+                # Epistemic precision: if fetch was skipped/blocked because robots.txt disallows it,
+                # that is an intentional crawler policy exclusion, NOT an HTTP status error!
+                if "robots" in pr.error.lower() or is_auth_or_utility_url(url):
+                    continue
                 bad_codes.append(f"{url} -> {pr.error[:80]}")
-            if len(pr.redirect_chain) > 2 or (pr.error and "redirect" in pr.error.lower()):
-                long_redirects.append(
-                    f"{url} ({len(pr.redirect_chain)} hops)" if pr.redirect_chain else f"{url} (redirect loop)"
-                )
+
+            # Do not penalize standard auth redirect loops on auth endpoints
+            if not is_auth_or_utility_url(url):
+                if len(pr.redirect_chain) > 2 or (pr.error and "redirect" in pr.error.lower()):
+                    long_redirects.append(
+                        f"{url} ({len(pr.redirect_chain)} hops)" if pr.redirect_chain else f"{url} (redirect loop)"
+                    )
         total_pages = len(page_results)
 
         if waf_urls:
@@ -697,6 +711,10 @@ def _check_cr003_cr004(
                     continue
 
             # --- Static-only heuristic (used when renderer is None or render skipped) ---
+            if is_auth_or_utility_url(url, pr.soup):
+                # Auth/utility pages naturally have minimal text and should not be penalized for CSR blanking
+                continue
+
             raw_ratio = extract_text_ratio(pr.soup)
             word_count = static_word_count
 
@@ -719,14 +737,11 @@ def _check_cr003_cr004(
 
             has_substantial_text = (word_count >= 250 and len(visible_text) >= 1000)
             effective_ratio = raw_ratio
-            # Only infer client-side blanking if the page contains scripts
             has_scripts = bool(pr.soup.find("script") or is_spa)
-            if not has_substantial_text and has_scripts:
+
+            if not has_substantial_text and has_scripts and not is_spa:
                 disp = f"{url} (ratio={effective_ratio:.2f})"
-                if effective_ratio < TEXT_BLANK_THRESH and (word_count < 80 or is_spa):
-                    severe_urls.add(url)
-                    display[url] = disp
-                elif effective_ratio < CSR_WARN_THRESH or (effective_ratio < TEXT_BLANK_THRESH and word_count < 250):
+                if effective_ratio < CSR_WARN_THRESH:
                     moderate_urls.add(url)
                     display[url] = disp
 
@@ -737,40 +752,72 @@ def _check_cr003_cr004(
                 pr.render_confidence = "high"
 
         total_checked = len(page_results)
-        combined_urls = severe_urls | spa_shell_urls
-        if combined_urls:
-            evidence_strs = [display.get(u, u) for u in sorted(combined_urls)[:5]]
+
+        # 1. Confirmed severe CSR blanking (requires headless renderer)
+        if severe_urls:
+            evidence_strs = [display.get(u, u) for u in sorted(severe_urls)[:5]]
             findings.append(_finding(
                 "CR-003",
                 "Severe CSR text blanking — content invisible to non-JS crawlers",
                 "critical",
-                f"[{EvidenceState.CONFIRMED.value if renderer is not None else EvidenceState.INSUFFICIENT_EVIDENCE.value}] "
-                f"{len(combined_urls)} page(s) have critically low text-to-HTML ratio "
-                f"(< {TEXT_BLANK_THRESH}): " + "; ".join(evidence_strs),
+                f"[{EvidenceState.CONFIRMED.value}] {len(severe_urls)} page(s) have verified client-side "
+                f"text blanking (< {TEXT_BLANK_THRESH}): " + "; ".join(evidence_strs),
                 "Implement server-side rendering (SSR) or static-site generation "
                 "(SSG) so content is available in the initial HTML response. "
                 "Ensure critical text is not loaded exclusively via client-side "
                 "JavaScript.",
                 related=["CR-004"],
-                pages_affected=len(combined_urls),
+                pages_affected=len(severe_urls),
                 pages_checked=total_checked,
             ))
-        moderate_final = moderate_urls - combined_urls
-        if moderate_final:
-            evidence_strs = [display.get(u, u) for u in sorted(moderate_final)[:5]]
-            findings.append(_finding(
-                "CR-004",
-                "Moderate CSR text blanking — reduced content in raw HTML",
-                "high",
-                f"[{EvidenceState.CONFIRMED.value if renderer is not None else EvidenceState.INSUFFICIENT_EVIDENCE.value}] "
-                f"{len(moderate_final)} page(s) have low text ratio "
-                f"(< {CSR_WARN_THRESH}): " + "; ".join(evidence_strs),
-                "Review pages for JS-dependent content rendering. Consider "
-                "pre-rendering or dynamic rendering for AI crawlers.",
-                related=["CR-003"],
-                pages_affected=len(moderate_final),
-                pages_checked=total_checked,
-            ))
+
+        # 2. Confirmed moderate CSR blanking (when renderer ran) vs Unverified SPA shell vs Low text density
+        if renderer is not None:
+            if moderate_urls:
+                evidence_strs = [display.get(u, u) for u in sorted(moderate_urls)[:5]]
+                findings.append(_finding(
+                    "CR-004",
+                    "Moderate CSR text blanking — reduced content in raw HTML",
+                    "high",
+                    f"[{EvidenceState.CONFIRMED.value}] {len(moderate_urls)} page(s) have verified reduced text "
+                    f"(< {CSR_WARN_THRESH}): " + "; ".join(evidence_strs),
+                    "Review pages for JS-dependent content rendering. Consider "
+                    "pre-rendering or dynamic rendering for AI crawlers.",
+                    related=["CR-003"],
+                    pages_affected=len(moderate_urls),
+                    pages_checked=total_checked,
+                ))
+        else:
+            # When renderer is None, distinguish unverified SPA shell from static markup density
+            if spa_shell_urls:
+                evidence_strs = [display.get(u, u) for u in sorted(spa_shell_urls)[:5]]
+                findings.append(_finding(
+                    "CR-004",
+                    "Unverified single-page application (SPA) shell detected",
+                    "medium",
+                    f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] {len(spa_shell_urls)} page(s) contain client-side "
+                    "SPA mount containers and dynamic scripts with sparse raw text: " + "; ".join(evidence_strs),
+                    "Enable server-side rendering (SSR) or pre-rendering for AI crawler user-agents "
+                    "so core textual content is present in raw HTML responses without requiring JavaScript execution.",
+                    related=["CR-003"],
+                    pages_affected=len(spa_shell_urls),
+                    pages_checked=total_checked,
+                ))
+
+            if moderate_urls:
+                evidence_strs = [display.get(u, u) for u in sorted(moderate_urls)[:5]]
+                findings.append(_finding(
+                    "CR-004",
+                    "Low text-to-markup density in static HTML",
+                    "low",
+                    f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] {len(moderate_urls)} page(s) have low text-to-markup "
+                    f"ratio (< {CSR_WARN_THRESH}): " + "; ".join(evidence_strs),
+                    "Review pages with low text density. If content is rendered via client-side JavaScript, "
+                    "enable pre-rendering or SSR for AI search crawlers. If content is concise by design, ensure key facts are in visible text.",
+                    related=["CR-003"],
+                    pages_affected=len(moderate_urls),
+                    pages_checked=total_checked,
+                ))
     except Exception as exc:
         logger.debug("CR-003/004 error: %s", exc)
     return findings
@@ -796,11 +843,15 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
         r"\b(?:select|enter|choose|detect)\s+(?:your\s+)?(?:delivery\s+)?(?:location|pincode|address)\b",
         re.IGNORECASE,
     )
-    _OVERLAY_PATTERNS = re.compile(
-        r"(position\s*:\s*(fixed|absolute).*?(width\s*:\s*100|height\s*:\s*100|"
-        r"inset\s*:\s*0|top\s*:\s*0.*?left\s*:\s*0))",
+    _OVERLAY_FULLVIEW_RE = re.compile(
+        r"(?:inset\s*:\s*0|"
+        r"(?:top\s*:\s*0.*?bottom\s*:\s*0)|"
+        r"(?:width\s*:\s*100(?:%|vw).*?height\s*:\s*100(?:%|vh))|"
+        r"(?:height\s*:\s*100(?:%|vh).*?width\s*:\s*100(?:%|vw)))",
         re.IGNORECASE | re.DOTALL,
     )
+    _EXCLUDE_NAV_TAGS = {"header", "nav", "footer", "main"}
+    _EXCLUDE_NAV_CLASSES = re.compile(r"header|navbar|nav|menu|topbar|toolbar|cookie|consent|banner|breadcrumb", re.I)
 
     try:
         geo_urls: list[str] = []
@@ -845,15 +896,21 @@ def _check_cr005(page_results: dict[str, PageResult]) -> list[dict]:
                         flagged_for_page = True
                         break
 
-            if not flagged_for_page:
-                # Check inline styles for full-viewport overlays
+            if not flagged_for_page and not is_auth_or_utility_url(url, pr.soup):
+                # Check inline styles for true full-viewport overlays (excluding headers/navbars)
                 for el in pr.soup.find_all(style=True):
+                    if el.name in _EXCLUDE_NAV_TAGS:
+                        continue
+                    comb_class = " ".join(el.get("class", [])) + " " + (el.get("id") or "")
+                    if _EXCLUDE_NAV_CLASSES.search(comb_class):
+                        continue
                     style = el.get("style", "")
-                    if _OVERLAY_PATTERNS.search(style):
-                        z_match = re.search(r"z-index\s*:\s*(\d+)", style)
-                        if z_match and int(z_match.group(1)) > 100:
-                            overlay_urls.append(url)
-                            break
+                    if "position" in style and ("fixed" in style or "absolute" in style):
+                        if _OVERLAY_FULLVIEW_RE.search(style):
+                            z_match = re.search(r"z-index\s*:\s*(\d+)", style)
+                            if z_match and int(z_match.group(1)) > 100:
+                                overlay_urls.append(url)
+                                break
 
         total_pages = len(page_results)
 

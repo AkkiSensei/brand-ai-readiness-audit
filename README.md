@@ -149,7 +149,7 @@ python skills/audit-orchestrator/scripts/aggregate.py https://example.com --rend
 
 ### Tests
 ```bash
-# Run all 274 automated regression tests
+# Run all 293 automated regression tests
 python -m pytest tests/
 
 # Multi-domain dry-run smoke test

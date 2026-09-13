@@ -73,7 +73,7 @@ brand-ai-readiness-audit/
 │       ├── SKILL.md
 │       └── scripts/
 │           └── er_audit.py           # Document hierarchy, overlays, CTAs, & links
-└── tests/                            # Automated regression & validation test suites (274 tests)
+└── tests/                            # Automated regression & validation test suites (293 tests)
 ```
 
 ### 2.1 Single Designated Entrypoint

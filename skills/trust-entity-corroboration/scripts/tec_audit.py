@@ -105,12 +105,11 @@ _AUTHORITATIVE_DOMAINS = {
     "google.com",  # Google Knowledge Panel
 }
 
-# Authority / certification / partnership claim detection heuristics
 _CLAIM_RE = re.compile(
     r"\b(?:"
     r"(?:certified|accredited|endorsed|approved|recognized|licensed|verified)\s+by|"
     r"(?:official|authorized|certified|accredited|premier|gold|platinum|strategic)\s+(?:partner|reseller|distributor|member)|"
-    r"(?:partnered\s+with|in\s+partnership\s+with|partnership\s+with)|"
+    r"(?:official|authorized|certified|strategic|premier|exclusive)\s+(?:partner|partnership)\s+(?:with|of)|"
     r"(?:member\s+of|membership\s+in|accredited\s+member)|"
     r"(?:iso\s*\d+|soc[\s-]?\d+|hipaa|pci[\s-]dss|gdpr)\s+(?:certified|compliant|accredited)|"
     r"(?:we\s+are|is|our\s+company\s+is)\s+(?:an?\s+)?(?:officially\s+)?(?:certified|accredited|endorsed|approved|recognized|licensed|verified)"
@@ -428,8 +427,8 @@ def _check_tc001(
             findings.append(_finding(
                 "TC-001",
                 "No sameAs links in Organization schema",
-                "high",
-                f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] No Organization JSON-LD block contains a sameAs property. "
+                "medium",
+                f"[{EvidenceState.CONFIRMED.value}] Organization JSON-LD block exists on the site but does not declare a sameAs property. "
                 "AI engines cannot corroborate your brand identity against "
                 "authoritative external profiles.",
                 "Add a sameAs array to your Organization JSON-LD with links "
@@ -688,12 +687,20 @@ def _extract_authority_claims(
         page_url = pr.url or url
 
         for el in pr.soup.find_all(
-            ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "span", "a", "blockquote", "figcaption", "td"]
+            ["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "span", "a", "figcaption", "td"]
         ):
             # Skip broad container elements if they contain child paragraphs or blocks
             if el.name in ("div", "section", "article", "main", "footer", "header", "td"):
                 if el.find(["p", "li", "h1", "h2", "h3", "h4", "h5", "h6", "div", "section", "article"]):
                     continue
+
+            # Skip editorial quotes, customer testimonials, and case-study endorsements
+            if el.name == "blockquote" or el.find_parent("blockquote"):
+                continue
+            parent_classes = " ".join(el.parent.get("class", [])).lower() if el.parent else ""
+            el_classes = " ".join(el.get("class", [])).lower()
+            if re.search(r"testimonial|quote|review|case[-_]?study|story|endorsement", f"{el_classes} {parent_classes}"):
+                continue
 
             text = el.get_text(" ", strip=True)
             if not text or len(text) > 400:
@@ -854,12 +861,12 @@ def _check_tc005(
 
         findings.append(_finding(
             "TC-005",
-            "Authority or partnership claims lack external verification links",
+            "Unlinked certification or regulatory claim detected",
             "medium",
-            f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] Site presents {len(unlinked)} authority or partnership claim(s) "
+            f"[{EvidenceState.INSUFFICIENT_EVIDENCE.value}] Site presents {len(unlinked)} authority or certification claim(s) "
             f"without verifiable outbound links: " + "; ".join(sample_claims),
-            "Add verifiable outbound links to authoritative registries, industry "
-            "bodies, or official partner directories so AI engines can corroborate claims.",
+            "Add verifiable outbound links to official certifying bodies, licensing registries, "
+            "or partner directories so AI answer engines can independently corroborate credentials.",
             related=[],
             pages_affected=affected_pages,
             pages_checked=len(frontier),
@@ -955,7 +962,7 @@ def _check_tc004_tc006(
                     pages_checked=len(valid_pages),
                 ))
 
-        # TC-006: Missing Organization disambiguators
+        # TC-006: Missing Organization disambiguators (evaluated only when Organization schema exists)
         if org_blocks:
             missing_disambig: list[str] = []
             for block in org_blocks:
@@ -984,19 +991,6 @@ def _check_tc004_tc006(
                     pages_affected=len(valid_pages),
                     pages_checked=len(valid_pages),
                 ))
-        else:
-            findings.append(_finding(
-                "TC-006",
-                "No Organization schema found for entity disambiguation",
-                "medium",
-                "No JSON-LD Organization block was found across the site. "
-                "AI engines have no structured disambiguation signals.",
-                "Add an Organization JSON-LD block to your homepage with "
-                "name, url, foundingDate, address, and description.",
-                related=["SF-001"],
-                pages_affected=len(valid_pages),
-                pages_checked=len(valid_pages),
-            ))
 
     except Exception as exc:
         logger.debug("TC-004/006 error: %s", exc)
