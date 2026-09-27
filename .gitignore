@@ -68,4 +68,9 @@ scratch/
 *.report.json
 report_*.json
 release/
+reports/
 Adobe-Brief.pdf
+Adobe-Brief-Prototype.pdf
+
+# Live execution artifacts
+tests/validation_stress_results.json
