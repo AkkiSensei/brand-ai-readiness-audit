@@ -290,7 +290,7 @@ The marketplace evaluates **arbitrary, unseen public websites** by assessing str
 
 ### 10.1 Evaluated Archetypes (11 Total)
 
-The engine is verified against 11 synthetic and live website archetypes:
+The engine is verified against 11 representative website archetypes:
 
 | # | Archetype | Key Checks Exercised |
 |---|---|---|
@@ -325,7 +325,7 @@ If Playwright headless rendering is unavailable, the engine automatically falls 
 An honest appraisal of current system boundaries:
 
 1. **Headless browser dependency**: `PlaywrightRenderer` requires Chromium binaries. Without them, CSR blanking measurements fall back to static heuristics, which cannot evaluate runtime JavaScript rendering.
-2. **Active edge tarpit traversal**: When CDNs (e.g., Akamai on gucci.com) enforce TLS tarpitting or TCP packet drops, the engine correctly protects itself via read timeouts (8 s) and aborts cleanly. It does not attempt CAPTCHA bypass by design.
+2. **Active edge tarpit traversal**: When CDNs enforce TLS tarpitting or TCP packet drops, the engine correctly protects itself via read timeouts (8 s) and aborts cleanly. It does not attempt CAPTCHA bypass by design.
 3. **External claim verification sampling**: TC-003 rate-limits external HEAD requests to a maximum of 5 unique authority URLs per audit to prevent crawl explosion.
 4. **Sitemap traversal ceiling**: Sitemap index child sitemaps are capped at 10 child sitemaps and 500 total URLs (`sitemap_max_urls`) to preserve bounded runtime.
 5. **No authenticated access**: Pages behind login walls or paywalls are not audited beyond the gate detection heuristic.
@@ -357,4 +357,4 @@ An honest appraisal of current system boundaries:
 | Evidence & Severity | Every finding has severity, evidence, action | 100% of findings include ID, severity, evidence, suggested_action | **PASS** |
 | Proactive Suggestions | Forward-looking AI recommendations | Dedicated engine: PA-001..PA-006, PA-CANONICAL | **PASS** |
 | Skill Composition | Genuine multi-skill orchestration | Entrypoint coordinates crawl frontier, parallel sub-skill runs, dedup | **PASS** |
-| Unseen Generalization | Generalized rules, not fit-to-examples | Verified across 11 archetypes, 4 chaos scenarios, live URLs | **PASS** |
+| Unseen Generalization | Generalized rules, not fit-to-examples | Verified across 11 archetypes, 4 chaos scenarios, and adversarial suites | **PASS** |

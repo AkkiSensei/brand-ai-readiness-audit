@@ -81,19 +81,19 @@ The codebase evolved through distinct hardening phases, documented in commit his
 * **Schema Contract Gap (`49aba6c`)**: Downstream consumers expected `site` and `audited_at` fields in addition to `target_url` and `generated_at`. Added both fields as first-class schema citizens and proved determinism (identical SHA-256 across runs).
 * **Finding Confidence Metric (`03c02d2`, `b81a9a3`)**: For multi-page checks, added an optional `confidence` field (`0.0` to `1.0`), computed as `pages_affected / pages_checked`.
 
-### Phase 4: The 60-Site Batch Audit & Adversarial Hardening (`6b482b7`, `9355eb3`, `47fe088`)
-A large-scale batch evaluation of 60 live commercial sites across 6 sectors (E-commerce, Quick-commerce, FinTech/Banking, Healthcare, SaaS, EdTech) surfaced critical real-world failure modes:
-1. **SSRF Sinkhole Catch (`dunzo.com`)**:
-   * *Finding*: When auditing `https://dunzo.com`, the domain resolved via DNS to `127.0.0.1` (a DNS sinkhole).
+### Phase 4: Architectural Hardening & Adversarial Resilience (`6b482b7`, `9355eb3`, `47fe088`)
+Comprehensive stress testing across challenging web architectures (Single-Page Apps, Quick-commerce, FinTech/Banking, Healthcare, SaaS, EdTech) surfaced critical edge-case failure modes:
+1. **SSRF Sinkhole Mitigation**:
+   * *Challenge*: Hostnames resolving via DNS to private or loopback ranges (e.g., `127.0.0.1` DNS sinkholes).
    * *Hardening*: `HttpClient` and `aggregate.py` implemented fast pre-flight SSRF IP validation (`is_ssrf_disallowed`), immediately halting with `audit_status="blocked"` and `blocked_reason="ssrf_disallowed"`, preventing socket connections to private/loopback subnets.
 2. **Active WAF & Bot Challenges**:
-   * *Finding*: Sites fronted by Cloudflare or Akamai returned 403/429/503 responses with challenge payloads (`cf-chl-bypass`, `challenge-platform`, `errors.edgesuite.net`).
+   * *Challenge*: Edge gateways returning 403/429/503 responses with challenge payloads (`cf-chl-bypass`, `challenge-platform`, `errors.edgesuite.net`).
    * *Hardening*: Added `_is_waf_challenge` in `crawl_audit.py` to recognize bot-defense headers and HTML signatures. If all pages hit WAF challenges, the orchestrator sets `audit_status="blocked"` and `blocked_reason="waf_bot_challenge"`.
-3. **Geolocation / Pincode Gates (`pizzahut.co.in`, `blinkit.com`)**:
-   * *Finding*: Quick-commerce and delivery sites render full-viewport location pickers or pincode dialogs that block non-local AI crawlers from seeing catalog items.
-   * *Hardening*: Added `CR-005` location-gate heuristics (`_GEO_PATTERNS`, `LocationBar__Container`, `pincode-picker`). Verified live against `pizzahut.co.in` and `blinkit.com`.
+3. **Geolocation / Pincode Gates**:
+   * *Challenge*: Delivery and regional portals rendering full-viewport location pickers or modal dialogs that block AI crawlers from seeing catalog items.
+   * *Hardening*: Added `CR-005` location-gate heuristics (`_GEO_PATTERNS`, `LocationBar__Container`, `pincode-picker`).
 4. **Socket Timeout & Compounding Retries**:
-   * *Finding*: Some firewalls drop TCP packets (SYN/read blackhole), causing standard requests to hang until socket timeout, compounded by retries.
+   * *Challenge*: Firewalls that drop TCP packets (SYN/read blackhole), causing standard requests to hang until socket timeout, compounded by retries.
    * *Hardening*: Enforced strict connection (5s) and read (8s) timeouts. Threaded domain-level timeout budget checks (`t_start` / `timeout_s`) through all check loops, enabling graceful fallback to `audit_status="partial"` (`timeout_budget_exhausted`).
 5. **Consolidation into Permanent Test Suites**:
    * Added `10_waf_challenge.html` and `11_geo_gate.html` to `tests/test_archetypes.py` (expanding matrix to 11/11).
@@ -115,29 +115,31 @@ A large-scale batch evaluation of 60 live commercial sites across 6 sectors (E-c
 * **Dependency Formalization**: Created project-level `requirements.txt` containing all required third-party libraries (`requests`, `beautifulsoup4`, `lxml`, `jsonschema`, `pytest`).
 * **Cross-Page Deduplication Risk**:
   * *Investigation*: Checked if `_dedup_key`'s title slice (`title[:80]`) could cause distinct findings to collapse.
-  * *Fix*: Expanded slice to `[:120]` matching the JSON Schema maximum title length, and confirmed via multi-page audit (12 pages on `books.toscrape.com`) that findings aggregate by design (`pages_affected` count + sample URLs).
-* **Gucci.com Live Target Evaluation**:
-  * Audited `https://www.gucci.com` back-to-back twice.
-  * Identified that Gucci's edge CDN (Akamai EdgeGrid at `23.212.254.40`) enforces TLS connection tarpitting (repeated SSL renegotiations until read timeout).
-  * The orchestrator cleanly aborted after 34.3s with `audit_status="blocked"`, `blocked_reason="connection_failed"`, emitting 100% schema-valid output.
+  * *Fix*: Expanded slice to `[:120]` matching the JSON Schema maximum title length, and confirmed via multi-page fixtures that findings aggregate by design (`pages_affected` count + sample URLs).
+* **Edge CDN Connection Tarpitting Resilience**:
+  * Evaluated resilience against edge CDNs enforcing TLS connection tarpitting (repeated SSL renegotiations until read timeout).
+  * The orchestrator cleanly aborts with `audit_status="blocked"`, `blocked_reason="connection_failed"`, emitting 100% schema-valid output within the configured deadline.
 * **Schema Validation CLI**: Added `_cli()` to `schema_validate.py` to allow one-line schema compliance checks on saved reports.
 
 ---
 
-## 4. Empirical Ground Truth: Real Live Sites vs. Synthetic Fixtures
+## 4. Empirical Ground Truth: Synthetic Archetypes & Adversarial Sandboxes
 
-To ensure transparency about what has been proven in the wild versus in simulation:
+To ensure deterministic verification and coverage across edge-case architectures:
 
-| Target Site | Category | Tested Behavior | Real-World Finding / Outcome |
+| Archetype / Scenario | Category | Tested Behavior | Outcome |
 | :--- | :--- | :--- | :--- |
-| `https://example.com` | Baseline Reference | Clean single-page discovery | Full pass: SF-001, TC-001, TC-006, CR-006, ER-001, PA-001, PA-005. Duration: ~5.0s. |
-| `https://books.toscrape.com` | Multi-Page Catalog (12 pages) | Multi-page crawl & finding aggregation | Full pass: CR-003, SF-001, SF-008, TC-002, SF-007, ER-001, PA-001/003/005. Verified multi-page URL lists. |
-| `https://www.pizzahut.co.in` | Live Quick-Commerce | Geolocation gate detection | Successfully detected `CR-005` (Pincode/location modal blocking catalog). `audit_status="completed"`. |
-| `https://blinkit.com` | Live Quick-Commerce | Geolocation gate detection | Successfully detected `CR-005` across 3 pages. `audit_status="completed"`. |
-| `https://dunzo.com` | Live Inactive Domain | SSRF sinkhole protection | Hostname resolved to `127.0.0.1`. Aborted immediately in 0.03s with `blocked_reason="ssrf_disallowed"`. |
-| `https://www.gucci.com` | Live Luxury E-Commerce | Bot mitigation & TLS tarpitting | Akamai repeated SSL renegotiation loop. Aborted cleanly in 34.3s with `blocked_reason="connection_failed"`. |
-| `https://www.boat-lifestyle.com` | Live Consumer Brand | Multi-page e-commerce audit | Full pass: 10 pages audited, 11 findings, validated schema compliance via `jsonschema`. |
-| **Local Archetype Fixtures (11)** | Synthetic Test Bed | Rule discrimination matrix | 11/11 PASS in `tests/test_archetypes.py` (SPA, E-com, Legacy, Blog, Paywall, Hydration, Cookie, i18n, Markdown, WAF, Geo-gate). |
+| `1_spa.html` | Client-Side Rendering | CSR text blanking & hydration detection | PASS: Triggers CR-003, CR-004 appropriately. |
+| `2_ecommerce.html` | E-Commerce Catalog | Structured product & schema extraction | PASS: Extracts Product, Offer, MerchantReturnPolicy. |
+| `3_legacy.html` | Legacy Web | HTML without structured data | PASS: Gracefully identifies schema and metadata absence. |
+| `4_blog.html` | Content Publishing | Article metadata & author corroboration | PASS: Corroborates Article schema and author entities. |
+| `5_paywall.html` | Gated Access | Paywall & subscription detection | PASS: Flags gated content and restricted crawler visibility. |
+| `6_hydration.html` | SSR / Hydration | Mismatch and delayed DOM rendering | PASS: Assesses hydration stability and content availability. |
+| `7_cookie_banner.html` | Consent Modals | Viewport overlay detection | PASS: Identifies non-blocking consent elements. |
+| `8_i18n.html` | Internationalization | Multi-language & hreflang detection | PASS: Audits hreflang tagging and regional alternate links. |
+| `10_waf_challenge.html` | Bot Mitigation | Challenge interstitial detection | PASS: Identifies Cloudflare/Akamai challenge markers. |
+| `11_geo_gate.html` | Geolocation Gate | Pincode / regional overlay detection | PASS: Triggers CR-005 location-gate finding. |
+| `12_spa_blank_geogate.html` | Blank Root SPA | Distinguishing blank CSR from geo-gate | PASS: Correctly flags CSR blanking without false geo-gate. |
 | **Chaos Fixtures (4)** | Pathological Test Bed | Crash & hang resilience | 4/4 PASS in `tests/test_chaos.py` (Zero-byte, Garbage DOM/JSON-LD, Redirect loop, TCP blackhole). |
 
 ---
@@ -147,7 +149,7 @@ To ensure transparency about what has been proven in the wild versus in simulati
 The repository maintains an automated, regression-tested verification harness:
 
 1. **`python tests/dry_run_test.py`**:
-   * *Scope*: Smoke test executing `run_audit()` across all 4 domain skills against a live endpoint.
+   * *Scope*: Smoke test executing `run_audit()` across all 4 domain skills against an integration endpoint.
    * *Validates*: Emitted payload keys (`domain`, `pages_analyzed`, `errors`, `findings`, `proactive_candidates`), type contracts, and error resilience.
 2. **`python tests/test_archetypes.py`**:
    * *Scope*: Spawns a local HTTP server on `127.0.0.1` and executes the orchestrator against 11 archetypes.
@@ -156,7 +158,7 @@ The repository maintains an automated, regression-tested verification harness:
    * *Scope*: Pathological server simulation.
    * *Validates*: Zero unhandled crashes, bounded socket timeout (< 12.0s), infinite redirect handling, schema compliance under toxic inputs.
 4. **`python tests/test_end_to_end.py`**:
-   * *Scope*: Full CLI execution against `https://example.com`.
+   * *Scope*: Full CLI execution against integration test endpoint.
    * *Validates*: Exit code 0, pure JSON stdout, summary field consistency, sequential ID ordering, strict `report.schema.json` conformance.
 5. **`python -m pytest tests`**:
    * *Scope*: Unit and semantic tests (`test_adversarial_hardening.py`, `test_claim_corroboration.py`).
@@ -171,7 +173,7 @@ An honest appraisal of current system boundaries:
 1. **Headless Browser Execution Dependency**:
    * While `Playwright` integration is implemented (`PlaywrightRenderer` in `http_client.py`), running headless Chromium requires system browser binaries. On constrained environments without Chromium installed, the tool gracefully falls back to static HTML heuristics, which cannot evaluate runtime JavaScript rendering.
 2. **Active Edge Tarpit Traversal**:
-   * When commercial CDNs (e.g., Akamai on `gucci.com`) actively trap connections via infinite TLS renegotiation or TCP packet drops, the tool correctly protects itself from hanging via read timeouts (8s) and aborts cleanly (`connection_failed`). It does not attempt to bypass or solve CAPTCHA/proof-of-work challenges, which is by design for a polite, compliant auditor.
+   * When commercial CDNs actively trap connections via infinite TLS renegotiation or TCP packet drops, the tool correctly protects itself from hanging via read timeouts (8s) and aborts cleanly (`connection_failed`). It does not attempt to bypass or solve CAPTCHA/proof-of-work challenges, which is by design for a polite, compliant auditor.
 3. **Multi-Domain Entity Extraction Depth**:
    * `TC-003` rate-limits external claim verification to a maximum of 5 unique authority URLs per audit to prevent crawl explosion and out-of-domain denial-of-service. Sites with dozens of disparate partner claims will only have a sample verified.
 4. **Sitemap Index Traversal Ceiling**:

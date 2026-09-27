@@ -57,6 +57,7 @@ EXCLUDE_DIR_NAMES = {
     "build",
     "tools",
     "scratch",
+    "reports",
 }
 
 EXCLUDE_FILE_EXTENSIONS = {
@@ -75,6 +76,8 @@ EXCLUDE_FILE_NAMES = {
     "Thumbs.db",
     "desktop.ini",
     ".coverage",
+    "validation_stress_results.json",
+    "live_run.json",
 }
 
 
